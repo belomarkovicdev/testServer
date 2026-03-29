@@ -43,8 +43,16 @@ const server = net.createServer((socket) => {
   log(`Client connected: ${clientId}`);
 
   socket.on("data", (chunk) => {
+    // Respond to HTTP health checks from Railway
+    const str = chunk.toString();
+    if (str.startsWith("GET ")) {
+      socket.write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK");
+      socket.end();
+      return;
+    }
+
     log(`Received ${chunk.length} bytes from ${clientId}`);
-    log(`Raw data: ${chunk.toString()}`);
+    log(`Raw data: ${str}`);
     log(`Hex dump:\n${hexDump(chunk)}`);
 
     const req = https.request({
