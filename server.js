@@ -162,6 +162,7 @@ const server = net.createServer((socket) => {
       const deviceId = phone.toString("hex").replace(/^0+/, "");
 
       log(`Message 0x${msgId.toString(16).padStart(4,"0")} from ${deviceId}, serial=${serial}, bodyLen=${bodyLen}`);
+      log(`Unescaped frame hex: ${frame.toString("hex")}`);
 
       if (msgId === 0x0100) {
         // Terminal Registration -> send registration ack
@@ -181,6 +182,7 @@ const server = net.createServer((socket) => {
         log(`Sent location query command to ${deviceId}`);
       } else if (msgId === 0x0200) {
         // Location report -> parse and forward
+        log(`Location body hex: ${body.toString("hex")}`);
         const loc = parseLocation(body);
         if (loc) {
           log(`Location: lat=${loc.lat}, lng=${loc.lng}, speed=${loc.speed}, time=${loc.time}`);
