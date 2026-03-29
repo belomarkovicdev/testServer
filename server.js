@@ -5,7 +5,7 @@ const https = require("https");
 const PORT = parseInt(process.env.PORT || "9000", 10);
 const HOST = "0.0.0.0";
 const API_HOST = "jbtracker.onrender.com";
-const API_PATH = "/location";
+const API_PATH = "/location/raw";
 // ──────────────────────────────────────────────────────────────────────────────
 
 function log(text) {
@@ -87,76 +87,11 @@ function extractFrames(data) {
   return frames;
 }
 
-// ─── Parsing ─────────────────────────────────────────────────────────────────
+// ─── Forward raw frame to API ────────────────────────────────────────────────
 
-function parseExtras(body) {
-  const extras = {};
-  let offset = 28;
-  while (offset < body.length) {
-    const id = body.readUInt8(offset++);
-    if (offset >= body.length) break;
-    const len = body.readUInt8(offset++);
-    if (offset + len > body.length) break;
-    extras[id] = body.subarray(offset, offset + len);
-    offset += len;
-  }
-  return extras;
-}
-
-function parseLBS(buf) {
-  if (buf.length < 4) return null;
-  const mcc = buf.readUInt16BE(0);
-  const mnc = buf.readUInt16BE(2);
-  const towers = [];
-  let offset = 4;
-  while (offset + 8 <= buf.length) {
-    towers.push({
-      mcc, mnc,
-      lac: buf.readUInt16BE(offset + 1),
-      cellId: buf.readUInt16BE(offset + 4),
-      signal: buf.readUInt8(offset + 6),
-      rssi: buf.readUInt8(offset + 7),
-    });
-    offset += 8;
-  }
-  return towers;
-}
-
-function parseLocation(body) {
-  if (body.length < 28) return null;
-
-  const alarm = body.readUInt32BE(0);
-  const status = body.readUInt32BE(4);
-  const lat = body.readUInt32BE(8) / 1e6;
-  const lng = body.readUInt32BE(12) / 1e6;
-  const altitude = body.readUInt16BE(16);
-  const speed = body.readUInt16BE(18) / 10;
-  const direction = body.readUInt16BE(20);
-
-  const ts = body.subarray(22, 28);
-  const time = `20${ts[0].toString(16).padStart(2,"0")}-${ts[1].toString(16).padStart(2,"0")}-${ts[2].toString(16).padStart(2,"0")} ${ts[3].toString(16).padStart(2,"0")}:${ts[4].toString(16).padStart(2,"0")}:${ts[5].toString(16).padStart(2,"0")}`;
-
-  const extras = parseExtras(body);
-
-  return {
-    lat, lng, altitude, speed, direction, time, alarm, status,
-    towers: extras[0xe1] ? parseLBS(extras[0xe1]) : null,
-    odometer: extras[0x01] ? extras[0x01].readUInt32BE(0) / 10 : null,
-    signalStrength: extras[0x30] ? extras[0x30].readUInt8(0) : null,
-    satellites: extras[0x31] ? extras[0x31].readUInt8(0) : null,
-    battery: extras[0xe4] ? extras[0xe4].readUInt16BE(0) : null,
-    charging: extras[0xe5] ? extras[0xe5].readUInt8(0) : null,
-    acc: extras[0xe6] ? extras[0xe6].readUInt8(0) : null,
-    deviceMode: extras[0xe7] ? extras[0xe7].toString("hex") : null,
-    posMode: extras[0xf5] ? extras[0xf5].readUInt8(0) : null,
-  };
-}
-
-// ─── Forward location to API ─────────────────────────────────────────────────
-
-function forwardLocation(deviceId, location) {
-  const payload = JSON.stringify({ deviceId, ...location });
-  log(`Forwarding: ${payload}`);
+function forwardRawFrame(deviceId, rawHex, msgId) {
+  const payload = JSON.stringify({ deviceId, msgId, rawHex });
+  log(`Forwarding raw frame: msgId=0x${msgId.toString(16).padStart(4,"0")} (${rawHex.length / 2} bytes)`);
 
   const req = https.request({
     hostname: API_HOST,
@@ -195,45 +130,37 @@ const server = net.createServer((socket) => {
       if (frame.length < 12) continue;
 
       const msgId = frame.readUInt16BE(0);
-      const bodyLen = frame.readUInt16BE(2) & 0x03ff;
       const phone = frame.subarray(4, 10);
       const serial = frame.readUInt16BE(10);
-      const body = frame.subarray(12, 12 + bodyLen);
       const deviceId = phone.toString("hex").replace(/^0+/, "");
+      const rawHex = chunk.toString("hex");
 
       log(`[${deviceId}] Message 0x${msgId.toString(16).padStart(4, "0")}, serial=${serial}`);
 
+      // Forward every frame to the backend
+      forwardRawFrame(deviceId, rawHex, msgId);
+
+      // Still handle protocol responses so the tracker stays connected
       switch (msgId) {
-        case 0x0100: {
-          const resp = buildRegisterAck(phone, serverSerial++, serial, 0, "AUTH" + deviceId);
-          socket.write(resp);
+        case 0x0100:
+          socket.write(buildRegisterAck(phone, serverSerial++, serial, 0, "AUTH" + deviceId));
           log(`[${deviceId}] Registration ack sent`);
           break;
-        }
-        case 0x0102: {
+        case 0x0102:
           socket.write(buildAck(phone, serverSerial++, serial, msgId, 0));
           socket.write(buildResponse(0x8201, phone, serverSerial++, Buffer.alloc(0)));
           log(`[${deviceId}] Auth ack + location query sent`);
           break;
-        }
-        case 0x0200: {
-          const loc = parseLocation(body);
-          if (loc) {
-            log(`[${deviceId}] Location: ${loc.lat},${loc.lng} speed=${loc.speed} bat=${loc.battery}%`);
-            forwardLocation(deviceId, loc);
-          }
+        case 0x0200:
           socket.write(buildAck(phone, serverSerial++, serial, msgId, 0));
           break;
-        }
-        case 0x0002: {
+        case 0x0002:
           socket.write(buildAck(phone, serverSerial++, serial, msgId, 0));
           log(`[${deviceId}] Heartbeat ack`);
           break;
-        }
-        default: {
+        default:
           socket.write(buildAck(phone, serverSerial++, serial, msgId, 0));
           log(`[${deviceId}] Unknown 0x${msgId.toString(16).padStart(4, "0")}, ack sent`);
-        }
       }
     }
   });
