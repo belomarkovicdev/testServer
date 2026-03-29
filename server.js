@@ -1,15 +1,22 @@
 const net = require("net");
 const https = require("https");
+const fs = require("fs");
+const path = require("path");
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 const PORT = 9000;
 const HOST = "0.0.0.0";
 const API_HOST = "jbtracker.onrender.com";
 const API_PATH = "/location";
+const LOG_FILE = path.join(__dirname, "messages.log");
 // ──────────────────────────────────────────────────────────────────────────────
 
+const logStream = fs.createWriteStream(LOG_FILE, { flags: "a" });
+
 function log(text) {
-  console.log(`[${new Date().toISOString()}] ${text}`);
+  const line = `[${text}`;
+  console.log(line);
+  logStream.write(line + "\n");
 }
 
 /**
