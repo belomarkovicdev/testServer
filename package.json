@@ -4,8 +4,9 @@
   "description": "",
   "main": "server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node server.js"
+    "start": "tsx src/server.ts",
+    "build": "tsc",
+    "test": "echo \"Error: no test specified\" && exit 1"
   },
   "repository": {
     "type": "git",
@@ -18,5 +19,12 @@
   "bugs": {
     "url": "https://github.com/belomarkovicdev/testServer/issues"
   },
-  "homepage": "https://github.com/belomarkovicdev/testServer#readme"
+  "homepage": "https://github.com/belomarkovicdev/testServer#readme",
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "typescript": "^6.0.2"
+  },
+  "dependencies": {
+    "tsx": "^4.21.0"
+  }
 }
