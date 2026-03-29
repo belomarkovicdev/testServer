@@ -98,50 +98,24 @@ function parseExtras(body) {
 }
 
 // Parse LBS (cell tower) info from extra item 0xE1
+// Format: MCC(2) MNC(2) then repeating 8-byte blocks:
+//   padding(1) LAC(2) padding(1) CellID(2) signal(1) rssi(1)
 function parseLBS(buf) {
   if (buf.length < 4) return null;
-  log(`LBS full hex (${buf.length} bytes): ${buf.toString("hex")}`);
-  
   const mcc = buf.readUInt16BE(0);
-  const mnc = buf.readUInt8(2);
-  // byte 3 might be count or part of first tower
-  const possibleCount = buf.readUInt8(3);
+  const mnc = buf.readUInt16BE(2);
   const towers = [];
-  
-  // The data after MCC(2)+MNC(1) is 33 bytes
-  // Try: count(1) + towers with LAC(2)+CellID(2)+signal(1)+extra(1) = 6 bytes each
-  // 33-1 = 32, 32/8 = 4 towers with 8 bytes each
-  // Or 32/4 = 8 towers... 
-  // Let's just dump each byte position to figure out the pattern
-  log(`LBS after header: ${buf.slice(3).toString("hex")}`);
-  
-  // Try format: after MCC(2) MNC(1), no count, just raw tower data
-  // Each tower: LAC(2) CellID(2) signal(1) = 5 bytes? 33/5 = 6.6 no
-  // Each tower: LAC(2) CellID(4) signal(1) = 7 bytes? 33/7 = 4.7 no
-  
-  // Let me try: byte3=count, then LAC(4) CellID(2) signal(1) rssi(1) = 8 bytes
-  // count=0? no. What if MNC is 2 bytes?
-  // MCC(2) MNC(2) = 00DC 0003, remaining = 32 bytes
-  // 32/8 = 4 towers exactly!
-  
-  const mcc2 = buf.readUInt16BE(0);
-  const mnc2 = buf.readUInt16BE(2);
   let offset = 4;
-  const remaining = buf.length - 4;
-  
-  // Try 8 bytes per tower: LAC(2) CellID(3) signal(1) + 2 unknown
-  // 32/8 = 4 towers
-  log(`Trying MCC=${mcc2} MNC=${mnc2}, remaining=${remaining} bytes`);
-  
+
   while (offset + 8 <= buf.length) {
-    const b = buf.slice(offset, offset + 8);
-    log(`Tower block: ${b.toString("hex")}`);
+    const lac = buf.readUInt16BE(offset + 1);
+    const cellId = buf.readUInt16BE(offset + 4);
+    const signal = buf.readUInt8(offset + 6);
+    const rssi = buf.readUInt8(offset + 7);
+    towers.push({ mcc, mnc, lac, cellId, signal, rssi });
     offset += 8;
   }
-  if (offset < buf.length) {
-    log(`Leftover: ${buf.slice(offset).toString("hex")}`);
-  }
-  
+  log(`LBS: MCC=${mcc}, MNC=${mnc}, towers=${JSON.stringify(towers)}`);
   return towers;
 }
 
@@ -174,7 +148,6 @@ function parseLocation(body) {
 
   // Parse extra TLV items
   const extras = parseExtras(body);
-  log(`Extra IDs: ${Object.keys(extras).map(k => '0x' + Number(k).toString(16)).join(', ')}`);
 
   // Parse LBS cell tower data if present
   let towers = null;
@@ -182,7 +155,33 @@ function parseLocation(body) {
     towers = parseLBS(extras[0xe1]);
   }
 
-  return { lat, lng, altitude, speed, direction, time, alarm, status, towers };
+  // Odometer (0x01): total distance in 1/10 km
+  const odometer = extras[0x01] ? extras[0x01].readUInt32BE(0) / 10 : null;
+
+  // Cellular signal strength (0x30)
+  const signalStrength = extras[0x30] ? extras[0x30].readUInt8(0) : null;
+
+  // Satellites in use (0x31)
+  const satellites = extras[0x31] ? extras[0x31].readUInt8(0) : null;
+
+  // Battery percentage (0xE4)
+  const battery = extras[0xe4] ? extras[0xe4].readUInt16BE(0) : null;
+
+  // Charging status (0xE5): 0=not charging, 1=charging
+  const charging = extras[0xe5] ? extras[0xe5].readUInt8(0) : null;
+
+  // ACC/ignition (0xE6): 0=off, 1=on
+  const acc = extras[0xe6] ? extras[0xe6].readUInt8(0) : null;
+
+  // Device mode (0xE7)
+  const deviceMode = extras[0xe7] ? extras[0xe7].toString("hex") : null;
+
+  // Positioning mode (0xF5): 1=GPS
+  const posMode = extras[0xf5] ? extras[0xf5].readUInt8(0) : null;
+
+  log(`Extras: odometer=${odometer}km, signal=${signalStrength}, sats=${satellites}, battery=${battery}%, charging=${charging}, acc=${acc}, posMode=${posMode}`);
+
+  return { lat, lng, altitude, speed, direction, time, alarm, status, towers, odometer, signalStrength, satellites, battery, charging, acc, deviceMode, posMode };
 }
 
 // Extract frames from raw data (split by 7E markers)
