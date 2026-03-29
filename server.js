@@ -170,11 +170,15 @@ const server = net.createServer((socket) => {
         socket.write(resp);
         log(`Sent registration ack`);
       } else if (msgId === 0x0102) {
-        // Authentication -> send ack
+        // Authentication -> send ack, then request fresh location
         log(`Authentication from ${deviceId}`);
         const resp = buildAck(phone, serverSerial++, serial, msgId, 0);
         socket.write(resp);
         log(`Sent auth ack`);
+        // Send location query command (0x8201) to request fresh position
+        const locQuery = buildResponse(0x8201, phone, serverSerial++, Buffer.alloc(0));
+        socket.write(locQuery);
+        log(`Sent location query command to ${deviceId}`);
       } else if (msgId === 0x0200) {
         // Location report -> parse and forward
         const loc = parseLocation(body);
