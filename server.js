@@ -1,8 +1,11 @@
 const net = require("net");
+const https = require("https");
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 const PORT = 9000;
 const HOST = "0.0.0.0";
+const API_HOST = "jbtracker.onrender.com";
+const API_PATH = "/location";
 // ──────────────────────────────────────────────────────────────────────────────
 
 function log(text) {
@@ -43,6 +46,18 @@ const server = net.createServer((socket) => {
     log(`Received ${chunk.length} bytes from ${clientId}`);
     log(`Raw data: ${chunk.toString()}`);
     log(`Hex dump:\n${hexDump(chunk)}`);
+
+    const req = https.request({
+      hostname: API_HOST,
+      path: API_PATH,
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+    }, (res) => {
+      log(`API responded: ${res.statusCode}`);
+    });
+    req.on("error", (err) => log(`API error: ${err.message}`));
+    req.write(chunk);
+    req.end();
   });
 
   socket.on("end", () => {
