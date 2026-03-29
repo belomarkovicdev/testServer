@@ -1,0 +1,10 @@
+import { CellTower, LocationData } from "./types";
+export declare function unescape808(buf: Buffer): Buffer;
+export declare function escape808(buf: Buffer): Buffer;
+export declare function calcChecksum(buf: Buffer): number;
+export declare function buildResponse(msgId: number, phone: Buffer, serial: number, body: Buffer): Buffer;
+export declare function buildAck(phone: Buffer, serial: number, ackSerial: number, ackMsgId: number, result: number): Buffer;
+export declare function buildRegisterAck(phone: Buffer, serial: number, ackSerial: number, result: number, authCode: string): Buffer;
+export declare function extractFrames(data: Buffer): Buffer[];
+export declare function parseLBS(buf: Buffer): CellTower[] | null;
+export declare function parseLocation(body: Buffer): LocationData | null;

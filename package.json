@@ -4,8 +4,8 @@
   "description": "",
   "main": "server.js",
   "scripts": {
-    "start": "tsx src/server.ts",
-    "build": "echo 'no build needed'",
+    "start": "node dist/server.js",
+    "build": "npx tsc",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "repository": {
@@ -20,11 +20,10 @@
     "url": "https://github.com/belomarkovicdev/testServer/issues"
   },
   "homepage": "https://github.com/belomarkovicdev/testServer#readme",
-  "devDependencies": {
-    "@types/node": "^25.5.0",
-    "typescript": "^6.0.2"
-  },
+  "devDependencies": {},
   "dependencies": {
-    "tsx": "^4.21.0"
+    "@types/node": "^25.5.0",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.2"
   }
 }
