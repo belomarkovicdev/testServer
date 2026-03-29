@@ -2,7 +2,7 @@ const net = require("net");
 const https = require("https");
 
 // ─── Config ───────────────────────────────────────────────────────────────────
-const PORT = process.env.PORT || 9000;
+const PORT = parseInt(process.env.PORT || "9000", 10);
 const HOST = "0.0.0.0";
 const API_HOST = "jbtracker.onrender.com";
 const API_PATH = "/location";
@@ -12,9 +12,8 @@ function log(text) {
   console.log(`[${new Date().toISOString()}] ${text}`);
 }
 
-// ─── JT/T 808 Protocol Helpers ───────────────────────────────────────────────
+// ─── JT/T 808 Protocol ──────────────────────────────────────────────────────
 
-// Unescape: 7D 02 -> 7E, 7D 01 -> 7D
 function unescape808(buf) {
   const out = [];
   for (let i = 0; i < buf.length; i++) {
@@ -29,7 +28,6 @@ function unescape808(buf) {
   return Buffer.from(out);
 }
 
-// Escape: 7E -> 7D 02, 7D -> 7D 01
 function escape808(buf) {
   const out = [];
   for (let i = 0; i < buf.length; i++) {
@@ -46,9 +44,7 @@ function calcChecksum(buf) {
   return cs;
 }
 
-// Build a JT/T 808 response frame
 function buildResponse(msgId, phoneBytes, serialNum, bodyBuf) {
-  // Header: msgId(2) + bodyLen(2) + phone(6) + serial(2)
   const header = Buffer.alloc(12);
   header.writeUInt16BE(msgId, 0);
   header.writeUInt16BE(bodyBuf.length, 2);
@@ -60,138 +56,30 @@ function buildResponse(msgId, phoneBytes, serialNum, bodyBuf) {
   return Buffer.concat([Buffer.from([0x7e]), escaped, Buffer.from([0x7e])]);
 }
 
-// Universal acknowledgment (0x8001)
 function buildAck(phoneBytes, serialNum, ackSerial, ackMsgId, result) {
   const body = Buffer.alloc(5);
   body.writeUInt16BE(ackSerial, 0);
   body.writeUInt16BE(ackMsgId, 2);
-  body.writeUInt8(result, 4); // 0 = success
+  body.writeUInt8(result, 4);
   return buildResponse(0x8001, phoneBytes, serialNum, body);
 }
 
-// Registration acknowledgment (0x8100)
 function buildRegisterAck(phoneBytes, serialNum, ackSerial, result, authCode) {
   const authBuf = Buffer.from(authCode, "ascii");
   const body = Buffer.alloc(3 + authBuf.length);
   body.writeUInt16BE(ackSerial, 0);
-  body.writeUInt8(result, 2); // 0 = success
+  body.writeUInt8(result, 2);
   authBuf.copy(body, 3);
   return buildResponse(0x8100, phoneBytes, serialNum, body);
 }
 
-// Parse extra information items (TLV) from location body
-function parseExtras(body) {
-  const extras = {};
-  let offset = 28; // extras start after the 28-byte base location
-  while (offset < body.length) {
-    const id = body.readUInt8(offset);
-    offset++;
-    if (offset >= body.length) break;
-    const len = body.readUInt8(offset);
-    offset++;
-    if (offset + len > body.length) break;
-    const val = body.slice(offset, offset + len);
-    extras[id] = val;
-    offset += len;
-  }
-  return extras;
-}
-
-// Parse LBS (cell tower) info from extra item 0xE1
-// Format: MCC(2) MNC(2) then repeating 8-byte blocks:
-//   padding(1) LAC(2) padding(1) CellID(2) signal(1) rssi(1)
-function parseLBS(buf) {
-  if (buf.length < 4) return null;
-  const mcc = buf.readUInt16BE(0);
-  const mnc = buf.readUInt16BE(2);
-  const towers = [];
-  let offset = 4;
-
-  while (offset + 8 <= buf.length) {
-    const lac = buf.readUInt16BE(offset + 1);
-    const cellId = buf.readUInt16BE(offset + 4);
-    const signal = buf.readUInt8(offset + 6);
-    const rssi = buf.readUInt8(offset + 7);
-    towers.push({ mcc, mnc, lac, cellId, signal, rssi });
-    offset += 8;
-  }
-  log(`LBS: MCC=${mcc}, MNC=${mnc}, towers=${JSON.stringify(towers)}`);
-  return towers;
-}
-
-// Lookup cell tower location using unwiredlabs or similar free API
-function lookupCellLocation(towers, callback) {
-  // Use Google-compatible cell tower format for opencellid/unwiredlabs
-  // For now, log the tower info — you can plug in an API key later
-  if (!towers || towers.length === 0) return callback(null);
-  const main = towers[0];
-  log(`Main tower: MCC=${main.mcc} MNC=${main.mnc} LAC=${main.lac} CellID=${main.cellId}`);
-  callback(null); // placeholder — needs geolocation API
-}
-
-// Parse location message (0x0200)
-function parseLocation(body) {
-  if (body.length < 28) return null;
-  const alarm = body.readUInt32BE(0);
-  const status = body.readUInt32BE(4);
-  const rawLat = body.readUInt32BE(8);
-  const rawLng = body.readUInt32BE(12);
-  const lat = rawLat / 1e6;
-  const lng = rawLng / 1e6;
-  log(`Raw lat=${rawLat} (0x${rawLat.toString(16)}), raw lng=${rawLng} (0x${rawLng.toString(16)})`);
-  const altitude = body.readUInt16BE(16);
-  const speed = body.readUInt16BE(18) / 10;
-  const direction = body.readUInt16BE(20);
-  // BCD timestamp: YY MM DD HH MM SS
-  const ts = body.slice(22, 28);
-  const time = `20${ts[0].toString(16).padStart(2,"0")}-${ts[1].toString(16).padStart(2,"0")}-${ts[2].toString(16).padStart(2,"0")} ${ts[3].toString(16).padStart(2,"0")}:${ts[4].toString(16).padStart(2,"0")}:${ts[5].toString(16).padStart(2,"0")}`;
-
-  // Parse extra TLV items
-  const extras = parseExtras(body);
-
-  // Parse LBS cell tower data if present
-  let towers = null;
-  if (extras[0xe1]) {
-    towers = parseLBS(extras[0xe1]);
-  }
-
-  // Odometer (0x01): total distance in 1/10 km
-  const odometer = extras[0x01] ? extras[0x01].readUInt32BE(0) / 10 : null;
-
-  // Cellular signal strength (0x30)
-  const signalStrength = extras[0x30] ? extras[0x30].readUInt8(0) : null;
-
-  // Satellites in use (0x31)
-  const satellites = extras[0x31] ? extras[0x31].readUInt8(0) : null;
-
-  // Battery percentage (0xE4)
-  const battery = extras[0xe4] ? extras[0xe4].readUInt16BE(0) : null;
-
-  // Charging status (0xE5): 0=not charging, 1=charging
-  const charging = extras[0xe5] ? extras[0xe5].readUInt8(0) : null;
-
-  // ACC/ignition (0xE6): 0=off, 1=on
-  const acc = extras[0xe6] ? extras[0xe6].readUInt8(0) : null;
-
-  // Device mode (0xE7)
-  const deviceMode = extras[0xe7] ? extras[0xe7].toString("hex") : null;
-
-  // Positioning mode (0xF5): 1=GPS
-  const posMode = extras[0xf5] ? extras[0xf5].readUInt8(0) : null;
-
-  log(`Extras: odometer=${odometer}km, signal=${signalStrength}, sats=${satellites}, battery=${battery}%, charging=${charging}, acc=${acc}, posMode=${posMode}`);
-
-  return { lat, lng, altitude, speed, direction, time, alarm, status, towers, odometer, signalStrength, satellites, battery, charging, acc, deviceMode, posMode };
-}
-
-// Extract frames from raw data (split by 7E markers)
 function extractFrames(data) {
   const frames = [];
   let start = -1;
   for (let i = 0; i < data.length; i++) {
     if (data[i] === 0x7e) {
       if (start >= 0 && i > start + 1) {
-        frames.push(data.slice(start + 1, i));
+        frames.push(data.subarray(start + 1, i));
       }
       start = i;
     }
@@ -199,10 +87,76 @@ function extractFrames(data) {
   return frames;
 }
 
+// ─── Parsing ─────────────────────────────────────────────────────────────────
+
+function parseExtras(body) {
+  const extras = {};
+  let offset = 28;
+  while (offset < body.length) {
+    const id = body.readUInt8(offset++);
+    if (offset >= body.length) break;
+    const len = body.readUInt8(offset++);
+    if (offset + len > body.length) break;
+    extras[id] = body.subarray(offset, offset + len);
+    offset += len;
+  }
+  return extras;
+}
+
+function parseLBS(buf) {
+  if (buf.length < 4) return null;
+  const mcc = buf.readUInt16BE(0);
+  const mnc = buf.readUInt16BE(2);
+  const towers = [];
+  let offset = 4;
+  while (offset + 8 <= buf.length) {
+    towers.push({
+      mcc, mnc,
+      lac: buf.readUInt16BE(offset + 1),
+      cellId: buf.readUInt16BE(offset + 4),
+      signal: buf.readUInt8(offset + 6),
+      rssi: buf.readUInt8(offset + 7),
+    });
+    offset += 8;
+  }
+  return towers;
+}
+
+function parseLocation(body) {
+  if (body.length < 28) return null;
+
+  const alarm = body.readUInt32BE(0);
+  const status = body.readUInt32BE(4);
+  const lat = body.readUInt32BE(8) / 1e6;
+  const lng = body.readUInt32BE(12) / 1e6;
+  const altitude = body.readUInt16BE(16);
+  const speed = body.readUInt16BE(18) / 10;
+  const direction = body.readUInt16BE(20);
+
+  const ts = body.subarray(22, 28);
+  const time = `20${ts[0].toString(16).padStart(2,"0")}-${ts[1].toString(16).padStart(2,"0")}-${ts[2].toString(16).padStart(2,"0")} ${ts[3].toString(16).padStart(2,"0")}:${ts[4].toString(16).padStart(2,"0")}:${ts[5].toString(16).padStart(2,"0")}`;
+
+  const extras = parseExtras(body);
+
+  return {
+    lat, lng, altitude, speed, direction, time, alarm, status,
+    towers: extras[0xe1] ? parseLBS(extras[0xe1]) : null,
+    odometer: extras[0x01] ? extras[0x01].readUInt32BE(0) / 10 : null,
+    signalStrength: extras[0x30] ? extras[0x30].readUInt8(0) : null,
+    satellites: extras[0x31] ? extras[0x31].readUInt8(0) : null,
+    battery: extras[0xe4] ? extras[0xe4].readUInt16BE(0) : null,
+    charging: extras[0xe5] ? extras[0xe5].readUInt8(0) : null,
+    acc: extras[0xe6] ? extras[0xe6].readUInt8(0) : null,
+    deviceMode: extras[0xe7] ? extras[0xe7].toString("hex") : null,
+    posMode: extras[0xf5] ? extras[0xf5].readUInt8(0) : null,
+  };
+}
+
 // ─── Forward location to API ─────────────────────────────────────────────────
+
 function forwardLocation(deviceId, location) {
   const payload = JSON.stringify({ deviceId, ...location });
-  log(`Forwarding location: ${payload}`);
+  log(`Forwarding: ${payload}`);
 
   const req = https.request({
     hostname: API_HOST,
@@ -212,9 +166,8 @@ function forwardLocation(deviceId, location) {
       "Content-Type": "application/json",
       "Content-Length": Buffer.byteLength(payload),
     },
-  }, (res) => {
-    log(`API responded: ${res.statusCode}`);
-  });
+  }, (res) => log(`API responded: ${res.statusCode}`));
+
   req.on("error", (err) => log(`API error: ${err.message}`));
   req.write(payload);
   req.end();
@@ -228,7 +181,6 @@ const server = net.createServer((socket) => {
   log(`Client connected: ${clientId}`);
 
   socket.on("data", (chunk) => {
-    // Respond to HTTP health checks from Railway
     if (chunk.toString("ascii", 0, 4) === "GET ") {
       socket.write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK");
       socket.end();
@@ -236,7 +188,6 @@ const server = net.createServer((socket) => {
     }
 
     log(`Received ${chunk.length} bytes from ${clientId}`);
-    log(`Raw hex: ${chunk.toString("hex")}`);
 
     const frames = extractFrames(chunk);
     for (const raw of frames) {
@@ -245,50 +196,44 @@ const server = net.createServer((socket) => {
 
       const msgId = frame.readUInt16BE(0);
       const bodyLen = frame.readUInt16BE(2) & 0x03ff;
-      const phone = frame.slice(4, 10);
+      const phone = frame.subarray(4, 10);
       const serial = frame.readUInt16BE(10);
-      const body = frame.slice(12, 12 + bodyLen);
+      const body = frame.subarray(12, 12 + bodyLen);
       const deviceId = phone.toString("hex").replace(/^0+/, "");
 
-      log(`Message 0x${msgId.toString(16).padStart(4,"0")} from ${deviceId}, serial=${serial}, bodyLen=${bodyLen}`);
-      log(`Unescaped frame hex: ${frame.toString("hex")}`);
+      log(`[${deviceId}] Message 0x${msgId.toString(16).padStart(4, "0")}, serial=${serial}`);
 
-      if (msgId === 0x0100) {
-        // Terminal Registration -> send registration ack
-        log(`Registration from ${deviceId}`);
-        const resp = buildRegisterAck(phone, serverSerial++, serial, 0, "AUTH" + deviceId);
-        socket.write(resp);
-        log(`Sent registration ack`);
-      } else if (msgId === 0x0102) {
-        // Authentication -> send ack, then request fresh location
-        log(`Authentication from ${deviceId}`);
-        const resp = buildAck(phone, serverSerial++, serial, msgId, 0);
-        socket.write(resp);
-        log(`Sent auth ack`);
-        // Send location query command (0x8201) to request fresh position
-        const locQuery = buildResponse(0x8201, phone, serverSerial++, Buffer.alloc(0));
-        socket.write(locQuery);
-        log(`Sent location query command to ${deviceId}`);
-      } else if (msgId === 0x0200) {
-        // Location report -> parse and forward
-        log(`Location body hex: ${body.toString("hex")}`);
-        const loc = parseLocation(body);
-        if (loc) {
-          log(`Location: lat=${loc.lat}, lng=${loc.lng}, speed=${loc.speed}, time=${loc.time}`);
-          forwardLocation(deviceId, loc);
+      switch (msgId) {
+        case 0x0100: {
+          const resp = buildRegisterAck(phone, serverSerial++, serial, 0, "AUTH" + deviceId);
+          socket.write(resp);
+          log(`[${deviceId}] Registration ack sent`);
+          break;
         }
-        const resp = buildAck(phone, serverSerial++, serial, msgId, 0);
-        socket.write(resp);
-      } else if (msgId === 0x0002) {
-        // Heartbeat -> send ack
-        const resp = buildAck(phone, serverSerial++, serial, msgId, 0);
-        socket.write(resp);
-        log(`Heartbeat ack sent`);
-      } else {
-        // Unknown message -> send generic ack
-        log(`Unknown message 0x${msgId.toString(16).padStart(4,"0")}`);
-        const resp = buildAck(phone, serverSerial++, serial, msgId, 0);
-        socket.write(resp);
+        case 0x0102: {
+          socket.write(buildAck(phone, serverSerial++, serial, msgId, 0));
+          socket.write(buildResponse(0x8201, phone, serverSerial++, Buffer.alloc(0)));
+          log(`[${deviceId}] Auth ack + location query sent`);
+          break;
+        }
+        case 0x0200: {
+          const loc = parseLocation(body);
+          if (loc) {
+            log(`[${deviceId}] Location: ${loc.lat},${loc.lng} speed=${loc.speed} bat=${loc.battery}%`);
+            forwardLocation(deviceId, loc);
+          }
+          socket.write(buildAck(phone, serverSerial++, serial, msgId, 0));
+          break;
+        }
+        case 0x0002: {
+          socket.write(buildAck(phone, serverSerial++, serial, msgId, 0));
+          log(`[${deviceId}] Heartbeat ack`);
+          break;
+        }
+        default: {
+          socket.write(buildAck(phone, serverSerial++, serial, msgId, 0));
+          log(`[${deviceId}] Unknown 0x${msgId.toString(16).padStart(4, "0")}, ack sent`);
+        }
       }
     }
   });
