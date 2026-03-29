@@ -79,6 +79,37 @@ function buildRegisterAck(phoneBytes, serialNum, ackSerial, result, authCode) {
   return buildResponse(0x8100, phoneBytes, serialNum, body);
 }
 
+// Parse extra information items (TLV) from location body
+function parseExtras(body) {
+  const extras = {};
+  let offset = 28; // extras start after the 28-byte base location
+  while (offset < body.length) {
+    const id = body.readUInt8(offset);
+    offset++;
+    if (offset >= body.length) break;
+    const len = body.readUInt8(offset);
+    offset++;
+    if (offset + len > body.length) break;
+    const val = body.slice(offset, offset + len);
+    extras[id] = val;
+    offset += len;
+  }
+  return extras;
+}
+
+// Parse LBS (cell tower) info from extra item 0x03
+// Format: MCC(2) MNC(1) [LAC(2) CellID(3) Signal(1)] * N
+function parseLBS(buf) {
+  if (buf.length < 3) return null;
+  const towers = [];
+  let offset = 0;
+  // First byte might be tower count or part of data — depends on implementation
+  // Common format: count(1) [MCC(2) MNC(1) LAC(2) CellID(3) signal(1)] * count
+  // Or: MCC(2) MNC(1) count(1) [LAC(2) CellID(3) signal(1)] * count
+  log(`LBS raw hex: ${buf.toString("hex")}`);
+  return buf;
+}
+
 // Parse location message (0x0200)
 function parseLocation(body) {
   if (body.length < 28) return null;
@@ -95,6 +126,14 @@ function parseLocation(body) {
   // BCD timestamp: YY MM DD HH MM SS
   const ts = body.slice(22, 28);
   const time = `20${ts[0].toString(16).padStart(2,"0")}-${ts[1].toString(16).padStart(2,"0")}-${ts[2].toString(16).padStart(2,"0")} ${ts[3].toString(16).padStart(2,"0")}:${ts[4].toString(16).padStart(2,"0")}:${ts[5].toString(16).padStart(2,"0")}`;
+
+  // Parse extra TLV items
+  const extras = parseExtras(body);
+  log(`Extra IDs: ${Object.keys(extras).map(k => '0x' + Number(k).toString(16)).join(', ')}`);
+  for (const [id, val] of Object.entries(extras)) {
+    log(`Extra 0x${Number(id).toString(16)}: ${val.toString("hex")}`);
+  }
+
   return { lat, lng, altitude, speed, direction, time, alarm, status };
 }
 
