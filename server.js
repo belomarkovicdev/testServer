@@ -2,7 +2,7 @@ const net = require("net");
 const https = require("https");
 
 // ─── Config ───────────────────────────────────────────────────────────────────
-const PORT = 9000;
+const PORT = process.env.PORT || 9000;
 const HOST = "0.0.0.0";
 const API_HOST = "jbtracker.onrender.com";
 const API_PATH = "/location";
