@@ -97,17 +97,34 @@ function parseExtras(body) {
   return extras;
 }
 
-// Parse LBS (cell tower) info from extra item 0x03
-// Format: MCC(2) MNC(1) [LAC(2) CellID(3) Signal(1)] * N
+// Parse LBS (cell tower) info from extra item 0xE1
+// Format: MCC(2) MNC(1) count(1) [LAC(2) CellID(3) signal(1)] * count  (common variant)
 function parseLBS(buf) {
-  if (buf.length < 3) return null;
+  if (buf.length < 4) return null;
+  const mcc = buf.readUInt16BE(0);
+  const mnc = buf.readUInt8(2);
+  const count = buf.readUInt8(3);
   const towers = [];
-  let offset = 0;
-  // First byte might be tower count or part of data — depends on implementation
-  // Common format: count(1) [MCC(2) MNC(1) LAC(2) CellID(3) signal(1)] * count
-  // Or: MCC(2) MNC(1) count(1) [LAC(2) CellID(3) signal(1)] * count
-  log(`LBS raw hex: ${buf.toString("hex")}`);
-  return buf;
+  let offset = 4;
+  for (let i = 0; i < count && offset + 6 <= buf.length; i++) {
+    const lac = buf.readUInt16BE(offset);
+    const cellId = (buf.readUInt8(offset + 2) << 16) | buf.readUInt16BE(offset + 3);
+    const signal = buf.readUInt8(offset + 5);
+    towers.push({ mcc, mnc, lac, cellId, signal });
+    offset += 6;
+  }
+  log(`LBS: MCC=${mcc}, MNC=${mnc}, towers=${JSON.stringify(towers)}`);
+  return towers;
+}
+
+// Lookup cell tower location using unwiredlabs or similar free API
+function lookupCellLocation(towers, callback) {
+  // Use Google-compatible cell tower format for opencellid/unwiredlabs
+  // For now, log the tower info — you can plug in an API key later
+  if (!towers || towers.length === 0) return callback(null);
+  const main = towers[0];
+  log(`Main tower: MCC=${main.mcc} MNC=${main.mnc} LAC=${main.lac} CellID=${main.cellId}`);
+  callback(null); // placeholder — needs geolocation API
 }
 
 // Parse location message (0x0200)
@@ -130,11 +147,14 @@ function parseLocation(body) {
   // Parse extra TLV items
   const extras = parseExtras(body);
   log(`Extra IDs: ${Object.keys(extras).map(k => '0x' + Number(k).toString(16)).join(', ')}`);
-  for (const [id, val] of Object.entries(extras)) {
-    log(`Extra 0x${Number(id).toString(16)}: ${val.toString("hex")}`);
+
+  // Parse LBS cell tower data if present
+  let towers = null;
+  if (extras[0xe1]) {
+    towers = parseLBS(extras[0xe1]);
   }
 
-  return { lat, lng, altitude, speed, direction, time, alarm, status };
+  return { lat, lng, altitude, speed, direction, time, alarm, status, towers };
 }
 
 // Extract frames from raw data (split by 7E markers)
