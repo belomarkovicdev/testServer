@@ -84,8 +84,11 @@ function parseLocation(body) {
   if (body.length < 28) return null;
   const alarm = body.readUInt32BE(0);
   const status = body.readUInt32BE(4);
-  const lat = body.readUInt32BE(8) / 1e6;
-  const lng = body.readUInt32BE(12) / 1e6;
+  const rawLat = body.readUInt32BE(8);
+  const rawLng = body.readUInt32BE(12);
+  const lat = rawLat / 1e6;
+  const lng = rawLng / 1e6;
+  log(`Raw lat=${rawLat} (0x${rawLat.toString(16)}), raw lng=${rawLng} (0x${rawLng.toString(16)})`);
   const altitude = body.readUInt16BE(16);
   const speed = body.readUInt16BE(18) / 10;
   const direction = body.readUInt16BE(20);
