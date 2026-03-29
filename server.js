@@ -5,7 +5,7 @@ const https = require("https");
 const PORT = parseInt(process.env.PORT || "9000", 10);
 const HOST = "0.0.0.0";
 const API_HOST = "jbtracker.onrender.com";
-const API_PATH = "/location/raw";
+const API_PATH = "/api/location/raw";
 // ──────────────────────────────────────────────────────────────────────────────
 
 function log(text) {
