@@ -1,5 +1,5 @@
 const net = require("net");
-const https = require("https");
+const http = require("http");
 const fs = require("fs");
 const path = require("path");
 
@@ -54,7 +54,7 @@ const server = net.createServer((socket) => {
     log(`Raw data: ${chunk.toString()}`);
     log(`Hex dump:\n${hexDump(chunk)}`);
 
-    const req = https.request({
+    const req = http.request({
       hostname: API_HOST,
       path: API_PATH,
       method: "POST",
