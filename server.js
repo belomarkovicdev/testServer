@@ -98,22 +98,48 @@ function parseExtras(body) {
 }
 
 // Parse LBS (cell tower) info from extra item 0xE1
-// Format: MCC(2) MNC(1) count(1) [LAC(2) CellID(3) signal(1)] * count  (common variant)
 function parseLBS(buf) {
-  if (buf.length < 4) return null;
+  if (buf.length < 5) return null;
   const mcc = buf.readUInt16BE(0);
-  const mnc = buf.readUInt8(2);
-  const count = buf.readUInt8(3);
+  const mnc = buf.readUInt16BE(2);
+  const count = buf.readUInt8(4);
   const towers = [];
-  let offset = 4;
-  for (let i = 0; i < count && offset + 6 <= buf.length; i++) {
-    const lac = buf.readUInt16BE(offset);
-    const cellId = (buf.readUInt8(offset + 2) << 16) | buf.readUInt16BE(offset + 3);
-    const signal = buf.readUInt8(offset + 5);
-    towers.push({ mcc, mnc, lac, cellId, signal });
-    offset += 6;
+  let offset = 5;
+  // Try different cell tower record sizes
+  const remaining = buf.length - 5;
+  const recordSize = count > 0 ? Math.floor(remaining / count) : 0;
+  log(`LBS: MCC=${mcc}, MNC=${mnc}, count=${count}, remaining=${remaining}, recordSize=${recordSize}`);
+  log(`LBS tower data hex: ${buf.slice(5).toString("hex")}`);
+  
+  for (let i = 0; i < count && offset < buf.length; i++) {
+    if (recordSize === 7) {
+      // LAC(2) CellID(3) signal(1) rssi(1)
+      const lac = buf.readUInt16BE(offset);
+      const cellId = (buf.readUInt8(offset + 2) << 16) | buf.readUInt16BE(offset + 3);
+      const signal = buf.readUInt8(offset + 5);
+      const rssi = buf.readUInt8(offset + 6);
+      towers.push({ mcc, mnc, lac, cellId, signal, rssi });
+      offset += 7;
+    } else if (recordSize === 6) {
+      // LAC(2) CellID(3) signal(1)
+      const lac = buf.readUInt16BE(offset);
+      const cellId = (buf.readUInt8(offset + 2) << 16) | buf.readUInt16BE(offset + 3);
+      const signal = buf.readUInt8(offset + 5);
+      towers.push({ mcc, mnc, lac, cellId, signal });
+      offset += 6;
+    } else if (recordSize === 5) {
+      // LAC(2) CellID(2) signal(1)
+      const lac = buf.readUInt16BE(offset);
+      const cellId = buf.readUInt16BE(offset + 2);
+      const signal = buf.readUInt8(offset + 4);
+      towers.push({ mcc, mnc, lac, cellId, signal });
+      offset += 5;
+    } else {
+      log(`Unknown LBS record size: ${recordSize}`);
+      break;
+    }
   }
-  log(`LBS: MCC=${mcc}, MNC=${mnc}, towers=${JSON.stringify(towers)}`);
+  log(`LBS towers: ${JSON.stringify(towers)}`);
   return towers;
 }
 
