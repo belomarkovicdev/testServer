@@ -1,22 +1,15 @@
 const net = require("net");
-const http = require("http");
-const fs = require("fs");
-const path = require("path");
+const https = require("https");
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 const PORT = 9000;
 const HOST = "0.0.0.0";
 const API_HOST = "jbtracker.onrender.com";
 const API_PATH = "/location";
-const LOG_FILE = path.join(__dirname, "messages.log");
 // ──────────────────────────────────────────────────────────────────────────────
 
-const logStream = fs.createWriteStream(LOG_FILE, { flags: "a" });
-
 function log(text) {
-  const line = `[${text}`;
-  console.log(line);
-  logStream.write(line + "\n");
+  console.log(`[${new Date().toISOString()}] ${text}`);
 }
 
 /**
@@ -54,7 +47,7 @@ const server = net.createServer((socket) => {
     log(`Raw data: ${chunk.toString()}`);
     log(`Hex dump:\n${hexDump(chunk)}`);
 
-    const req = http.request({
+    const req = https.request({
       hostname: API_HOST,
       path: API_PATH,
       method: "POST",
