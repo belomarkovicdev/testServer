@@ -99,47 +99,49 @@ function parseExtras(body) {
 
 // Parse LBS (cell tower) info from extra item 0xE1
 function parseLBS(buf) {
-  if (buf.length < 5) return null;
-  const mcc = buf.readUInt16BE(0);
-  const mnc = buf.readUInt16BE(2);
-  const count = buf.readUInt8(4);
-  const towers = [];
-  let offset = 5;
-  // Try different cell tower record sizes
-  const remaining = buf.length - 5;
-  const recordSize = count > 0 ? Math.floor(remaining / count) : 0;
-  log(`LBS: MCC=${mcc}, MNC=${mnc}, count=${count}, remaining=${remaining}, recordSize=${recordSize}`);
-  log(`LBS tower data hex: ${buf.slice(5).toString("hex")}`);
+  if (buf.length < 4) return null;
+  log(`LBS full hex (${buf.length} bytes): ${buf.toString("hex")}`);
   
-  for (let i = 0; i < count && offset < buf.length; i++) {
-    if (recordSize === 7) {
-      // LAC(2) CellID(3) signal(1) rssi(1)
-      const lac = buf.readUInt16BE(offset);
-      const cellId = (buf.readUInt8(offset + 2) << 16) | buf.readUInt16BE(offset + 3);
-      const signal = buf.readUInt8(offset + 5);
-      const rssi = buf.readUInt8(offset + 6);
-      towers.push({ mcc, mnc, lac, cellId, signal, rssi });
-      offset += 7;
-    } else if (recordSize === 6) {
-      // LAC(2) CellID(3) signal(1)
-      const lac = buf.readUInt16BE(offset);
-      const cellId = (buf.readUInt8(offset + 2) << 16) | buf.readUInt16BE(offset + 3);
-      const signal = buf.readUInt8(offset + 5);
-      towers.push({ mcc, mnc, lac, cellId, signal });
-      offset += 6;
-    } else if (recordSize === 5) {
-      // LAC(2) CellID(2) signal(1)
-      const lac = buf.readUInt16BE(offset);
-      const cellId = buf.readUInt16BE(offset + 2);
-      const signal = buf.readUInt8(offset + 4);
-      towers.push({ mcc, mnc, lac, cellId, signal });
-      offset += 5;
-    } else {
-      log(`Unknown LBS record size: ${recordSize}`);
-      break;
-    }
+  const mcc = buf.readUInt16BE(0);
+  const mnc = buf.readUInt8(2);
+  // byte 3 might be count or part of first tower
+  const possibleCount = buf.readUInt8(3);
+  const towers = [];
+  
+  // The data after MCC(2)+MNC(1) is 33 bytes
+  // Try: count(1) + towers with LAC(2)+CellID(2)+signal(1)+extra(1) = 6 bytes each
+  // 33-1 = 32, 32/8 = 4 towers with 8 bytes each
+  // Or 32/4 = 8 towers... 
+  // Let's just dump each byte position to figure out the pattern
+  log(`LBS after header: ${buf.slice(3).toString("hex")}`);
+  
+  // Try format: after MCC(2) MNC(1), no count, just raw tower data
+  // Each tower: LAC(2) CellID(2) signal(1) = 5 bytes? 33/5 = 6.6 no
+  // Each tower: LAC(2) CellID(4) signal(1) = 7 bytes? 33/7 = 4.7 no
+  
+  // Let me try: byte3=count, then LAC(4) CellID(2) signal(1) rssi(1) = 8 bytes
+  // count=0? no. What if MNC is 2 bytes?
+  // MCC(2) MNC(2) = 00DC 0003, remaining = 32 bytes
+  // 32/8 = 4 towers exactly!
+  
+  const mcc2 = buf.readUInt16BE(0);
+  const mnc2 = buf.readUInt16BE(2);
+  let offset = 4;
+  const remaining = buf.length - 4;
+  
+  // Try 8 bytes per tower: LAC(2) CellID(3) signal(1) + 2 unknown
+  // 32/8 = 4 towers
+  log(`Trying MCC=${mcc2} MNC=${mnc2}, remaining=${remaining} bytes`);
+  
+  while (offset + 8 <= buf.length) {
+    const b = buf.slice(offset, offset + 8);
+    log(`Tower block: ${b.toString("hex")}`);
+    offset += 8;
   }
-  log(`LBS towers: ${JSON.stringify(towers)}`);
+  if (offset < buf.length) {
+    log(`Leftover: ${buf.slice(offset).toString("hex")}`);
+  }
+  
   return towers;
 }
 
