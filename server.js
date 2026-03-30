@@ -150,113 +150,98 @@ const server = net.createServer((socket) => {
           socket.write(buildAck(phone, serverSerial++, serial, msgId, 0));
           log(`[${deviceId}] Auth ack sent`);
 
-          // Query terminal parameters to see current config
-          socket.write(buildResponse(0x8104, phone, serverSerial++, Buffer.alloc(0)));
-          log(`[${deviceId}] Queried terminal parameters`);
-
-          // Set terminal parameters (0x8103):
-          // Param 0x0001 = heartbeat interval (10s)
-          // Param 0x0029 = default reporting interval (10s)
-          // Param 0x002C = default distance interval (0 = disabled)
-          // Param 0x002F = emergency reporting interval (5s)
+          // Set GPS-related terminal parameters (0x8103)
           {
             const params = [];
-            // Heartbeat interval: 10 seconds
+
+            // 0x0020: Location reporting strategy (DWORD)
+            // 0 = timed reporting, 1 = by distance, 2 = timed + distance
             const p1 = Buffer.alloc(9);
-            p1.writeUInt32BE(0x0001, 0); p1.writeUInt8(4, 4); p1.writeUInt32BE(10, 5);
+            p1.writeUInt32BE(0x0020, 0); p1.writeUInt8(4, 4); p1.writeUInt32BE(0, 5);
             params.push(p1);
-            // Default reporting interval: 10 seconds
+
+            // 0x0021: Location reporting scheme (DWORD)
+            // 0 = based on ACC, 1 = based on login status
             const p2 = Buffer.alloc(9);
-            p2.writeUInt32BE(0x0029, 0); p2.writeUInt8(4, 4); p2.writeUInt32BE(10, 5);
+            p2.writeUInt32BE(0x0021, 0); p2.writeUInt8(4, 4); p2.writeUInt32BE(0, 5);
             params.push(p2);
-            // Default distance interval: 0 (time-based only)
+
+            // 0x0027: Sleep reporting interval (DWORD, seconds)
             const p3 = Buffer.alloc(9);
-            p3.writeUInt32BE(0x002C, 0); p3.writeUInt8(4, 4); p3.writeUInt32BE(0, 5);
+            p3.writeUInt32BE(0x0027, 0); p3.writeUInt8(4, 4); p3.writeUInt32BE(10, 5);
             params.push(p3);
+
+            // 0x0028: Emergency alarm reporting interval (DWORD, seconds)
+            const p4 = Buffer.alloc(9);
+            p4.writeUInt32BE(0x0028, 0); p4.writeUInt8(4, 4); p4.writeUInt32BE(5, 5);
+            params.push(p4);
+
+            // 0x0029: Default reporting interval (DWORD, seconds)
+            const p5 = Buffer.alloc(9);
+            p5.writeUInt32BE(0x0029, 0); p5.writeUInt8(4, 4); p5.writeUInt32BE(10, 5);
+            params.push(p5);
+
+            // 0x0001: Heartbeat interval (DWORD, seconds)
+            const p6 = Buffer.alloc(9);
+            p6.writeUInt32BE(0x0001, 0); p6.writeUInt8(4, 4); p6.writeUInt32BE(30, 5);
+            params.push(p6);
 
             const paramCount = Buffer.alloc(1);
             paramCount.writeUInt8(params.length, 0);
             const setBody = Buffer.concat([paramCount, ...params]);
             socket.write(buildResponse(0x8103, phone, serverSerial++, setBody));
-            log(`[${deviceId}] Set terminal parameters (heartbeat=10s, report=10s)`);
+            log(`[${deviceId}] Set GPS params: strategy=timed, sleep=10s, default=10s`);
           }
 
           // Request immediate location
           socket.write(buildResponse(0x8201, phone, serverSerial++, Buffer.alloc(0)));
           log(`[${deviceId}] Location query sent`);
 
-          // Send terminal control (0x8105) - command 6 = force GPS module restart on some devices
-          {
-            const ctrlBody = Buffer.alloc(1);
-            ctrlBody.writeUInt8(6, 0); // command word: varies by device
-            socket.write(buildResponse(0x8105, phone, serverSerial++, ctrlBody));
-            log(`[${deviceId}] Terminal control command sent`);
-          }
-
-          // Send text message (0x8300) with GPS reset command
-          // Some iCar trackers accept text commands via protocol
-          {
-            const flag = Buffer.alloc(1);
-            flag.writeUInt8(1, 0); // 1 = emergency
-            const text = Buffer.from("RESET", "ascii");
-            const textBody = Buffer.concat([flag, text]);
-            socket.write(buildResponse(0x8300, phone, serverSerial++, textBody));
-            log(`[${deviceId}] Text command RESET sent`);
-          }
-
-          // Try FIND command (makes device beep on some trackers)
-          {
-            const flag2 = Buffer.alloc(1);
-            flag2.writeUInt8(0, 0);
-            const text2 = Buffer.from("FIND", "ascii");
-            socket.write(buildResponse(0x8300, phone, serverSerial++, Buffer.concat([flag2, text2])));
-            log(`[${deviceId}] Text command FIND sent`);
-          }
-
-          // Try SOS/alarm command
-          {
-            const flag3 = Buffer.alloc(1);
-            flag3.writeUInt8(0, 0);
-            const text3 = Buffer.from("SL FIND", "ascii");
-            socket.write(buildResponse(0x8300, phone, serverSerial++, Buffer.concat([flag3, text3])));
-            log(`[${deviceId}] Text command SL FIND sent`);
-          }
-
-          // Temporary location tracking (0x8202) - track every 5s for 60s
+          // Temporary location tracking (0x8202) - every 5s indefinitely
           {
             const trackBody = Buffer.alloc(4);
-            trackBody.writeUInt16BE(5, 0);  // interval: 5 seconds
-            trackBody.writeUInt16BE(60, 2);  // duration: 60 seconds (0xFFFF = until cancelled)
+            trackBody.writeUInt16BE(5, 0);     // interval: 5 seconds
+            trackBody.writeUInt16BE(0xFFFF, 2); // duration: indefinite
             socket.write(buildResponse(0x8202, phone, serverSerial++, trackBody));
-            log(`[${deviceId}] Temporary tracking: every 5s for 60s`);
+            log(`[${deviceId}] Temporary tracking: every 5s indefinitely`);
           }
           break;
         case 0x0200:
           socket.write(buildAck(phone, serverSerial++, serial, msgId, 0));
           break;
-        case 0x0104: {
-          // Terminal parameter query response — log it
-          const bodyLen = frame.readUInt16BE(2) & 0x03ff;
-          const respBody = frame.subarray(12, 12 + bodyLen);
-          log(`[${deviceId}] Terminal params response: ${respBody.toString("hex")}`);
-          break;
-        }
-        case 0x0001: {
-          // Terminal general response — log result
-          const bodyLen2 = frame.readUInt16BE(2) & 0x03ff;
-          const respBody2 = frame.subarray(12, 12 + bodyLen2);
-          if (respBody2.length >= 5) {
-            const ackSerial = respBody2.readUInt16BE(0);
-            const ackId = respBody2.readUInt16BE(2);
-            const result = respBody2.readUInt8(4);
-            log(`[${deviceId}] Terminal ack: msgId=0x${ackId.toString(16).padStart(4,"0")}, result=${result} (${result === 0 ? "success" : "fail"})`);
-          }
-          break;
-        }
         case 0x0002:
           socket.write(buildAck(phone, serverSerial++, serial, msgId, 0));
           log(`[${deviceId}] Heartbeat ack`);
           break;
+        case 0x0107: {
+          // Terminal attribute report - device tells us its capabilities
+          // Respond with query terminal params to trigger full config exchange
+          socket.write(buildAck(phone, serverSerial++, serial, msgId, 0));
+          log(`[${deviceId}] Terminal attribute report received, ack sent`);
+          
+          // Query all terminal parameters (0x8104) - empty body
+          socket.write(buildResponse(0x8104, phone, serverSerial++, Buffer.alloc(0)));
+          log(`[${deviceId}] Queried all terminal parameters`);
+          break;
+        }
+        case 0x0001: {
+          // Terminal general response - device acking our commands
+          const bodyLen2 = frame.readUInt16BE(2) & 0x03ff;
+          const respBody2 = frame.subarray(12, 12 + bodyLen2);
+          if (respBody2.length >= 5) {
+            const ackId = respBody2.readUInt16BE(2);
+            const result = respBody2.readUInt8(4);
+            log(`[${deviceId}] Device ack: cmd=0x${ackId.toString(16).padStart(4,"0")} result=${result === 0 ? "OK" : "FAIL(" + result + ")"}`);
+          }
+          break;
+        }
+        case 0x0104: {
+          // Terminal parameter response
+          const bodyLen3 = frame.readUInt16BE(2) & 0x03ff;
+          const respBody3 = frame.subarray(12, 12 + bodyLen3);
+          log(`[${deviceId}] Terminal params (${respBody3.length} bytes): ${respBody3.subarray(0, Math.min(64, respBody3.length)).toString("hex")}...`);
+          break;
+        }
         default:
           socket.write(buildAck(phone, serverSerial++, serial, msgId, 0));
           log(`[${deviceId}] Unknown 0x${msgId.toString(16).padStart(4, "0")}, ack sent`);
