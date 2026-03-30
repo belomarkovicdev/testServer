@@ -184,6 +184,52 @@ const server = net.createServer((socket) => {
           // Request immediate location
           socket.write(buildResponse(0x8201, phone, serverSerial++, Buffer.alloc(0)));
           log(`[${deviceId}] Location query sent`);
+
+          // Send terminal control (0x8105) - command 6 = force GPS module restart on some devices
+          {
+            const ctrlBody = Buffer.alloc(1);
+            ctrlBody.writeUInt8(6, 0); // command word: varies by device
+            socket.write(buildResponse(0x8105, phone, serverSerial++, ctrlBody));
+            log(`[${deviceId}] Terminal control command sent`);
+          }
+
+          // Send text message (0x8300) with GPS reset command
+          // Some iCar trackers accept text commands via protocol
+          {
+            const flag = Buffer.alloc(1);
+            flag.writeUInt8(1, 0); // 1 = emergency
+            const text = Buffer.from("RESET", "ascii");
+            const textBody = Buffer.concat([flag, text]);
+            socket.write(buildResponse(0x8300, phone, serverSerial++, textBody));
+            log(`[${deviceId}] Text command RESET sent`);
+          }
+
+          // Try FIND command (makes device beep on some trackers)
+          {
+            const flag2 = Buffer.alloc(1);
+            flag2.writeUInt8(0, 0);
+            const text2 = Buffer.from("FIND", "ascii");
+            socket.write(buildResponse(0x8300, phone, serverSerial++, Buffer.concat([flag2, text2])));
+            log(`[${deviceId}] Text command FIND sent`);
+          }
+
+          // Try SOS/alarm command
+          {
+            const flag3 = Buffer.alloc(1);
+            flag3.writeUInt8(0, 0);
+            const text3 = Buffer.from("SL FIND", "ascii");
+            socket.write(buildResponse(0x8300, phone, serverSerial++, Buffer.concat([flag3, text3])));
+            log(`[${deviceId}] Text command SL FIND sent`);
+          }
+
+          // Temporary location tracking (0x8202) - track every 5s for 60s
+          {
+            const trackBody = Buffer.alloc(4);
+            trackBody.writeUInt16BE(5, 0);  // interval: 5 seconds
+            trackBody.writeUInt16BE(60, 2);  // duration: 60 seconds (0xFFFF = until cancelled)
+            socket.write(buildResponse(0x8202, phone, serverSerial++, trackBody));
+            log(`[${deviceId}] Temporary tracking: every 5s for 60s`);
+          }
           break;
         case 0x0200:
           socket.write(buildAck(phone, serverSerial++, serial, msgId, 0));
