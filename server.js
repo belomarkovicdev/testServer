@@ -197,6 +197,16 @@ const server = net.createServer((socket) => {
           socket.write(buildResponse(0x8201, phone, serverSerial++, Buffer.alloc(0)));
           log(`[${deviceId}] Location query sent`);
 
+          // Send iCar commands via text message (0x8300)
+          const cmds = ["SLXKDM", "SLXKLS", "SLXKDDMSKG"];
+          for (const cmd of cmds) {
+            const flag = Buffer.alloc(1);
+            flag.writeUInt8(0, 0);
+            const text = Buffer.from(cmd, "ascii");
+            socket.write(buildResponse(0x8300, phone, serverSerial++, Buffer.concat([flag, text])));
+            log(`[${deviceId}] Sent command: ${cmd}`);
+          }
+
           // Temporary location tracking (0x8202) - every 5s indefinitely
           {
             const trackBody = Buffer.alloc(4);
