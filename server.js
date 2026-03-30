@@ -148,12 +148,65 @@ const server = net.createServer((socket) => {
           break;
         case 0x0102:
           socket.write(buildAck(phone, serverSerial++, serial, msgId, 0));
+          log(`[${deviceId}] Auth ack sent`);
+
+          // Query terminal parameters to see current config
+          socket.write(buildResponse(0x8104, phone, serverSerial++, Buffer.alloc(0)));
+          log(`[${deviceId}] Queried terminal parameters`);
+
+          // Set terminal parameters (0x8103):
+          // Param 0x0001 = heartbeat interval (10s)
+          // Param 0x0029 = default reporting interval (10s)
+          // Param 0x002C = default distance interval (0 = disabled)
+          // Param 0x002F = emergency reporting interval (5s)
+          {
+            const params = [];
+            // Heartbeat interval: 10 seconds
+            const p1 = Buffer.alloc(9);
+            p1.writeUInt32BE(0x0001, 0); p1.writeUInt8(4, 4); p1.writeUInt32BE(10, 5);
+            params.push(p1);
+            // Default reporting interval: 10 seconds
+            const p2 = Buffer.alloc(9);
+            p2.writeUInt32BE(0x0029, 0); p2.writeUInt8(4, 4); p2.writeUInt32BE(10, 5);
+            params.push(p2);
+            // Default distance interval: 0 (time-based only)
+            const p3 = Buffer.alloc(9);
+            p3.writeUInt32BE(0x002C, 0); p3.writeUInt8(4, 4); p3.writeUInt32BE(0, 5);
+            params.push(p3);
+
+            const paramCount = Buffer.alloc(1);
+            paramCount.writeUInt8(params.length, 0);
+            const setBody = Buffer.concat([paramCount, ...params]);
+            socket.write(buildResponse(0x8103, phone, serverSerial++, setBody));
+            log(`[${deviceId}] Set terminal parameters (heartbeat=10s, report=10s)`);
+          }
+
+          // Request immediate location
           socket.write(buildResponse(0x8201, phone, serverSerial++, Buffer.alloc(0)));
-          log(`[${deviceId}] Auth ack + location query sent`);
+          log(`[${deviceId}] Location query sent`);
           break;
         case 0x0200:
           socket.write(buildAck(phone, serverSerial++, serial, msgId, 0));
           break;
+        case 0x0104: {
+          // Terminal parameter query response — log it
+          const bodyLen = frame.readUInt16BE(2) & 0x03ff;
+          const respBody = frame.subarray(12, 12 + bodyLen);
+          log(`[${deviceId}] Terminal params response: ${respBody.toString("hex")}`);
+          break;
+        }
+        case 0x0001: {
+          // Terminal general response — log result
+          const bodyLen2 = frame.readUInt16BE(2) & 0x03ff;
+          const respBody2 = frame.subarray(12, 12 + bodyLen2);
+          if (respBody2.length >= 5) {
+            const ackSerial = respBody2.readUInt16BE(0);
+            const ackId = respBody2.readUInt16BE(2);
+            const result = respBody2.readUInt8(4);
+            log(`[${deviceId}] Terminal ack: msgId=0x${ackId.toString(16).padStart(4,"0")}, result=${result} (${result === 0 ? "success" : "fail"})`);
+          }
+          break;
+        }
         case 0x0002:
           socket.write(buildAck(phone, serverSerial++, serial, msgId, 0));
           log(`[${deviceId}] Heartbeat ack`);
