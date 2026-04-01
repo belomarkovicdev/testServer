@@ -4,8 +4,9 @@ const https = require("https");
 // ─── Config ───────────────────────────────────────────────────────────────────
 const PORT = parseInt(process.env.PORT || "9000", 10);
 const HOST = "0.0.0.0";
-const API_HOST = "jbtracker.onrender.com";
-const API_PATH = "/api/location/raw"; 
+const API_HOST =
+  "https://pet-tracker-gfe7aygtbbhhb3b3.westeurope-01.azurewebsites.net";
+const API_PATH = "/api/location/raw";
 // ──────────────────────────────────────────────────────────────────────────────
 
 function log(text) {
@@ -18,9 +19,13 @@ function unescape808(buf) {
   const out = [];
   for (let i = 0; i < buf.length; i++) {
     if (buf[i] === 0x7d && i + 1 < buf.length) {
-      if (buf[i + 1] === 0x02) { out.push(0x7e); i++; }
-      else if (buf[i + 1] === 0x01) { out.push(0x7d); i++; }
-      else out.push(buf[i]);
+      if (buf[i + 1] === 0x02) {
+        out.push(0x7e);
+        i++;
+      } else if (buf[i + 1] === 0x01) {
+        out.push(0x7d);
+        i++;
+      } else out.push(buf[i]);
     } else {
       out.push(buf[i]);
     }
@@ -31,9 +36,11 @@ function unescape808(buf) {
 function escape808(buf) {
   const out = [];
   for (let i = 0; i < buf.length; i++) {
-    if (buf[i] === 0x7e) { out.push(0x7d, 0x02); }
-    else if (buf[i] === 0x7d) { out.push(0x7d, 0x01); }
-    else out.push(buf[i]);
+    if (buf[i] === 0x7e) {
+      out.push(0x7d, 0x02);
+    } else if (buf[i] === 0x7d) {
+      out.push(0x7d, 0x01);
+    } else out.push(buf[i]);
   }
   return Buffer.from(out);
 }
@@ -91,17 +98,22 @@ function extractFrames(data) {
 
 function forwardRawFrame(deviceId, rawHex, msgId) {
   const payload = JSON.stringify({ deviceId, msgId, rawHex });
-  log(`Forwarding raw frame: msgId=0x${msgId.toString(16).padStart(4,"0")} (${rawHex.length / 2} bytes)`);
+  log(
+    `Forwarding raw frame: msgId=0x${msgId.toString(16).padStart(4, "0")} (${rawHex.length / 2} bytes)`,
+  );
 
-  const req = https.request({
-    hostname: API_HOST,
-    path: API_PATH,
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Content-Length": Buffer.byteLength(payload),
+  const url = new URL(API_PATH, API_HOST);
+  const req = https.request(
+    url,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(payload),
+      },
     },
-  }, (res) => log(`API responded: ${res.statusCode}`));
+    (res) => log(`API responded: ${res.statusCode}`),
+  );
 
   req.on("error", (err) => log(`API error: ${err.message}`));
   req.write(payload);
@@ -135,7 +147,9 @@ const server = net.createServer((socket) => {
       const deviceId = phone.toString("hex").replace(/^0+/, "");
       const rawHex = chunk.toString("hex");
 
-      log(`[${deviceId}] Message 0x${msgId.toString(16).padStart(4, "0")}, serial=${serial}`);
+      log(
+        `[${deviceId}] Message 0x${msgId.toString(16).padStart(4, "0")}, serial=${serial}`,
+      );
 
       // Forward every frame to the backend
       forwardRawFrame(deviceId, rawHex, msgId);
@@ -143,7 +157,15 @@ const server = net.createServer((socket) => {
       // Still handle protocol responses so the tracker stays connected
       switch (msgId) {
         case 0x0100:
-          socket.write(buildRegisterAck(phone, serverSerial++, serial, 0, "AUTH" + deviceId));
+          socket.write(
+            buildRegisterAck(
+              phone,
+              serverSerial++,
+              serial,
+              0,
+              "AUTH" + deviceId,
+            ),
+          );
           log(`[${deviceId}] Registration ack sent`);
           break;
         case 0x0102:
@@ -157,62 +179,70 @@ const server = net.createServer((socket) => {
             // 0x0020: Location reporting strategy (DWORD)
             // 0 = timed reporting, 1 = by distance, 2 = timed + distance
             const p1 = Buffer.alloc(9);
-            p1.writeUInt32BE(0x0020, 0); p1.writeUInt8(4, 4); p1.writeUInt32BE(0, 5);
+            p1.writeUInt32BE(0x0020, 0);
+            p1.writeUInt8(4, 4);
+            p1.writeUInt32BE(0, 5);
             params.push(p1);
 
             // 0x0021: Location reporting scheme (DWORD)
             // 0 = based on ACC, 1 = based on login status
             const p2 = Buffer.alloc(9);
-            p2.writeUInt32BE(0x0021, 0); p2.writeUInt8(4, 4); p2.writeUInt32BE(0, 5);
+            p2.writeUInt32BE(0x0021, 0);
+            p2.writeUInt8(4, 4);
+            p2.writeUInt32BE(0, 5);
             params.push(p2);
 
             // 0x0027: Sleep reporting interval (DWORD, seconds)
             const p3 = Buffer.alloc(9);
-            p3.writeUInt32BE(0x0027, 0); p3.writeUInt8(4, 4); p3.writeUInt32BE(10, 5);
+            p3.writeUInt32BE(0x0027, 0);
+            p3.writeUInt8(4, 4);
+            p3.writeUInt32BE(10, 5);
             params.push(p3);
 
             // 0x0028: Emergency alarm reporting interval (DWORD, seconds)
             const p4 = Buffer.alloc(9);
-            p4.writeUInt32BE(0x0028, 0); p4.writeUInt8(4, 4); p4.writeUInt32BE(5, 5);
+            p4.writeUInt32BE(0x0028, 0);
+            p4.writeUInt8(4, 4);
+            p4.writeUInt32BE(5, 5);
             params.push(p4);
 
             // 0x0029: Default reporting interval (DWORD, seconds)
             const p5 = Buffer.alloc(9);
-            p5.writeUInt32BE(0x0029, 0); p5.writeUInt8(4, 4); p5.writeUInt32BE(10, 5);
+            p5.writeUInt32BE(0x0029, 0);
+            p5.writeUInt8(4, 4);
+            p5.writeUInt32BE(10, 5);
             params.push(p5);
 
             // 0x0001: Heartbeat interval (DWORD, seconds)
             const p6 = Buffer.alloc(9);
-            p6.writeUInt32BE(0x0001, 0); p6.writeUInt8(4, 4); p6.writeUInt32BE(30, 5);
+            p6.writeUInt32BE(0x0001, 0);
+            p6.writeUInt8(4, 4);
+            p6.writeUInt32BE(30, 5);
             params.push(p6);
 
             const paramCount = Buffer.alloc(1);
             paramCount.writeUInt8(params.length, 0);
             const setBody = Buffer.concat([paramCount, ...params]);
             socket.write(buildResponse(0x8103, phone, serverSerial++, setBody));
-            log(`[${deviceId}] Set GPS params: strategy=timed, sleep=10s, default=10s`);
+            log(
+              `[${deviceId}] Set GPS params: strategy=timed, sleep=10s, default=10s`,
+            );
           }
 
           // Request immediate location
-          socket.write(buildResponse(0x8201, phone, serverSerial++, Buffer.alloc(0)));
+          socket.write(
+            buildResponse(0x8201, phone, serverSerial++, Buffer.alloc(0)),
+          );
           log(`[${deviceId}] Location query sent`);
-
-          // Send iCar commands via text message (0x8300)
-          const cmds = ["SLXKDM", "SLXKLS", "SLXKDDMSKG"];
-          for (const cmd of cmds) {
-            const flag = Buffer.alloc(1);
-            flag.writeUInt8(0, 0);
-            const text = Buffer.from(cmd, "ascii");
-            socket.write(buildResponse(0x8300, phone, serverSerial++, Buffer.concat([flag, text])));
-            log(`[${deviceId}] Sent command: ${cmd}`);
-          }
 
           // Temporary location tracking (0x8202) - every 5s indefinitely
           {
             const trackBody = Buffer.alloc(4);
-            trackBody.writeUInt16BE(5, 0);     // interval: 5 seconds
-            trackBody.writeUInt16BE(0xFFFF, 2); // duration: indefinite
-            socket.write(buildResponse(0x8202, phone, serverSerial++, trackBody));
+            trackBody.writeUInt16BE(5, 0); // interval: 5 seconds
+            trackBody.writeUInt16BE(0xffff, 2); // duration: indefinite
+            socket.write(
+              buildResponse(0x8202, phone, serverSerial++, trackBody),
+            );
             log(`[${deviceId}] Temporary tracking: every 5s indefinitely`);
           }
           break;
@@ -228,9 +258,11 @@ const server = net.createServer((socket) => {
           // Respond with query terminal params to trigger full config exchange
           socket.write(buildAck(phone, serverSerial++, serial, msgId, 0));
           log(`[${deviceId}] Terminal attribute report received, ack sent`);
-          
+
           // Query all terminal parameters (0x8104) - empty body
-          socket.write(buildResponse(0x8104, phone, serverSerial++, Buffer.alloc(0)));
+          socket.write(
+            buildResponse(0x8104, phone, serverSerial++, Buffer.alloc(0)),
+          );
           log(`[${deviceId}] Queried all terminal parameters`);
           break;
         }
@@ -241,7 +273,9 @@ const server = net.createServer((socket) => {
           if (respBody2.length >= 5) {
             const ackId = respBody2.readUInt16BE(2);
             const result = respBody2.readUInt8(4);
-            log(`[${deviceId}] Device ack: cmd=0x${ackId.toString(16).padStart(4,"0")} result=${result === 0 ? "OK" : "FAIL(" + result + ")"}`);
+            log(
+              `[${deviceId}] Device ack: cmd=0x${ackId.toString(16).padStart(4, "0")} result=${result === 0 ? "OK" : "FAIL(" + result + ")"}`,
+            );
           }
           break;
         }
@@ -249,18 +283,24 @@ const server = net.createServer((socket) => {
           // Terminal parameter response
           const bodyLen3 = frame.readUInt16BE(2) & 0x03ff;
           const respBody3 = frame.subarray(12, 12 + bodyLen3);
-          log(`[${deviceId}] Terminal params (${respBody3.length} bytes): ${respBody3.subarray(0, Math.min(64, respBody3.length)).toString("hex")}...`);
+          log(
+            `[${deviceId}] Terminal params (${respBody3.length} bytes): ${respBody3.subarray(0, Math.min(64, respBody3.length)).toString("hex")}...`,
+          );
           break;
         }
         default:
           socket.write(buildAck(phone, serverSerial++, serial, msgId, 0));
-          log(`[${deviceId}] Unknown 0x${msgId.toString(16).padStart(4, "0")}, ack sent`);
+          log(
+            `[${deviceId}] Unknown 0x${msgId.toString(16).padStart(4, "0")}, ack sent`,
+          );
       }
     }
   });
 
   socket.on("end", () => log(`Client disconnected: ${clientId}`));
-  socket.on("error", (err) => log(`Socket error from ${clientId}: ${err.message}`));
+  socket.on("error", (err) =>
+    log(`Socket error from ${clientId}: ${err.message}`),
+  );
 });
 
 server.on("error", (err) => log(`Server error: ${err.message}`));
