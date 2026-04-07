@@ -332,6 +332,7 @@ function processDeviceData(socket, chunk, clientId, onDeviceId) {
     const rawHex = chunk.toString("hex");
 
     log(`[${deviceId}] Message 0x${msgId.toString(16).padStart(4, "0")}, serial=${serial}`);
+    log(`[${deviceId}] Full frame hex: ${frame.toString("hex")}`);
 
     if (!deviceRegistry.has(deviceId) || deviceRegistry.get(deviceId).socket !== socket) {
       deviceRegistry.set(deviceId, { socket, phone });
