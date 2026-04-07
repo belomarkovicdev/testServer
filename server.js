@@ -1,31 +1,34 @@
 const net = require("net");
-const https = require("https");
 
 // ─── Config ───────────────────────────────────────────────────────────────────
-const PORT = parseInt(process.env.PORT || "9000", 10);
+const PORT = parseInt(process.env.RAILWAY_TCP_APPLICATION_PORT || process.env.PORT || "9000", 10);
 const HOST = "0.0.0.0";
-const API_HOST =
+const API_HOST = process.env.API_HOST ||
   "https://pet-tracker-gfe7aygtbbhhb3b3.westeurope-01.azurewebsites.net";
 const API_PATH = "/api/location/raw";
+const BRIDGE_SECRET = process.env.BRIDGE_SECRET || "";
+
+// ICAR upstream server — device will be proxied here
+const ICAR_HOST = process.env.ICAR_HOST || "a.icargps.com";
+const ICAR_PORT = parseInt(process.env.ICAR_PORT || "7700", 10);
+const PROXY_MODE = process.env.PROXY_MODE === "true"; // set to "true" to enable MITM proxy
 // ──────────────────────────────────────────────────────────────────────────────
 
 function log(text) {
   console.log(`[${new Date().toISOString()}] ${text}`);
 }
 
-// ─── JT/T 808 Protocol ──────────────────────────────────────────────────────
+// ─── Device socket registry ───────────────────────────────────────────────────
+const deviceRegistry = new Map();
 
+// ─── JT/T 808 Protocol helpers ───────────────────────────────────────────────
 function unescape808(buf) {
   const out = [];
   for (let i = 0; i < buf.length; i++) {
     if (buf[i] === 0x7d && i + 1 < buf.length) {
-      if (buf[i + 1] === 0x02) {
-        out.push(0x7e);
-        i++;
-      } else if (buf[i + 1] === 0x01) {
-        out.push(0x7d);
-        i++;
-      } else out.push(buf[i]);
+      if (buf[i + 1] === 0x02) { out.push(0x7e); i++; }
+      else if (buf[i + 1] === 0x01) { out.push(0x7d); i++; }
+      else out.push(buf[i]);
     } else {
       out.push(buf[i]);
     }
@@ -35,19 +38,17 @@ function unescape808(buf) {
 
 function escape808(buf) {
   const out = [];
-  for (let i = 0; i < buf.length; i++) {
-    if (buf[i] === 0x7e) {
-      out.push(0x7d, 0x02);
-    } else if (buf[i] === 0x7d) {
-      out.push(0x7d, 0x01);
-    } else out.push(buf[i]);
+  for (const b of buf) {
+    if (b === 0x7e) out.push(0x7d, 0x02);
+    else if (b === 0x7d) out.push(0x7d, 0x01);
+    else out.push(b);
   }
   return Buffer.from(out);
 }
 
 function calcChecksum(buf) {
   let cs = 0;
-  for (let i = 0; i < buf.length; i++) cs ^= buf[i];
+  for (const b of buf) cs ^= b;
   return cs;
 }
 
@@ -85,226 +86,271 @@ function extractFrames(data) {
   let start = -1;
   for (let i = 0; i < data.length; i++) {
     if (data[i] === 0x7e) {
-      if (start >= 0 && i > start + 1) {
-        frames.push(data.subarray(start + 1, i));
-      }
+      if (start >= 0 && i > start + 1) frames.push(data.subarray(start + 1, i));
       start = i;
     }
   }
   return frames;
 }
 
-// ─── Forward raw frame to API ────────────────────────────────────────────────
-
+// ─── Forward raw frame to Spring backend ─────────────────────────────────────
 function forwardRawFrame(deviceId, rawHex, msgId) {
+  const https = require("https");
   const payload = JSON.stringify({ deviceId, msgId, rawHex });
-  log(
-    `Forwarding raw frame: msgId=0x${msgId.toString(16).padStart(4, "0")} (${rawHex.length / 2} bytes)`,
-  );
-
   const url = new URL(API_PATH, API_HOST);
-  const req = https.request(
-    url,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Content-Length": Buffer.byteLength(payload),
-      },
-    },
-    (res) => log(`API responded: ${res.statusCode}`),
-  );
-
+  const req = https.request(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) },
+  }, (res) => log(`API responded: ${res.statusCode}`));
   req.on("error", (err) => log(`API error: ${err.message}`));
   req.write(payload);
   req.end();
 }
 
-// ─── TCP Server ──────────────────────────────────────────────────────────────
-let serverSerial = 0;
+// ─── PROXY MODE: transparent MITM to ICAR server ─────────────────────────────
+function handleProxyMode(deviceSocket, firstChunk, clientId) {
+  log(`[PROXY] Connecting to ICAR ${ICAR_HOST}:${ICAR_PORT}`);
 
-const server = net.createServer((socket) => {
-  const clientId = `${socket.remoteAddress}:${socket.remotePort}`;
-  log(`Client connected: ${clientId}`);
+  const icarSocket = net.createConnection({ host: ICAR_HOST, port: ICAR_PORT }, () => {
+    log(`[PROXY] Connected to ICAR server`);
+    // Forward first chunk from device to ICAR
+    icarSocket.write(firstChunk);
+  });
 
-  socket.on("data", (chunk) => {
-    if (chunk.toString("ascii", 0, 4) === "GET ") {
-      socket.write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK");
-      socket.end();
-      return;
-    }
-
-    log(`Received ${chunk.length} bytes from ${clientId}`);
-
+  // Device → ICAR
+  deviceSocket.on("data", (chunk) => {
+    log(`[PROXY] Device→ICAR ${chunk.length} bytes: ${chunk.toString("hex")}`);
+    // Also forward location to our backend
     const frames = extractFrames(chunk);
     for (const raw of frames) {
       const frame = unescape808(raw);
       if (frame.length < 12) continue;
-
       const msgId = frame.readUInt16BE(0);
       const phone = frame.subarray(4, 10);
-      const serial = frame.readUInt16BE(10);
       const deviceId = phone.toString("hex").replace(/^0+/, "");
-      const rawHex = chunk.toString("hex");
-
-      log(
-        `[${deviceId}] Message 0x${msgId.toString(16).padStart(4, "0")}, serial=${serial}`,
-      );
-
-      // Forward every frame to the backend
-      forwardRawFrame(deviceId, rawHex, msgId);
-
-      // Still handle protocol responses so the tracker stays connected
-      switch (msgId) {
-        case 0x0100:
-          socket.write(
-            buildRegisterAck(
-              phone,
-              serverSerial++,
-              serial,
-              0,
-              "AUTH" + deviceId,
-            ),
-          );
-          log(`[${deviceId}] Registration ack sent`);
-          break;
-        case 0x0102:
-          socket.write(buildAck(phone, serverSerial++, serial, msgId, 0));
-          log(`[${deviceId}] Auth ack sent`);
-
-          // Set GPS-related terminal parameters (0x8103)
-          {
-            const params = [];
-
-            // 0x0020: Location reporting strategy (DWORD)
-            // 0 = timed reporting, 1 = by distance, 2 = timed + distance
-            const p1 = Buffer.alloc(9);
-            p1.writeUInt32BE(0x0020, 0);
-            p1.writeUInt8(4, 4);
-            p1.writeUInt32BE(0, 5);
-            params.push(p1);
-
-            // 0x0021: Location reporting scheme (DWORD)
-            // 0 = based on ACC, 1 = based on login status
-            const p2 = Buffer.alloc(9);
-            p2.writeUInt32BE(0x0021, 0);
-            p2.writeUInt8(4, 4);
-            p2.writeUInt32BE(0, 5);
-            params.push(p2);
-
-            // 0x0027: Sleep reporting interval (DWORD, seconds)
-            const p3 = Buffer.alloc(9);
-            p3.writeUInt32BE(0x0027, 0);
-            p3.writeUInt8(4, 4);
-            p3.writeUInt32BE(10, 5);
-            params.push(p3);
-
-            // 0x0028: Emergency alarm reporting interval (DWORD, seconds)
-            const p4 = Buffer.alloc(9);
-            p4.writeUInt32BE(0x0028, 0);
-            p4.writeUInt8(4, 4);
-            p4.writeUInt32BE(5, 5);
-            params.push(p4);
-
-            // 0x0029: Default reporting interval (DWORD, seconds)
-            const p5 = Buffer.alloc(9);
-            p5.writeUInt32BE(0x0029, 0);
-            p5.writeUInt8(4, 4);
-            p5.writeUInt32BE(10, 5);
-            params.push(p5);
-
-            // 0x0001: Heartbeat interval (DWORD, seconds)
-            const p6 = Buffer.alloc(9);
-            p6.writeUInt32BE(0x0001, 0);
-            p6.writeUInt8(4, 4);
-            p6.writeUInt32BE(30, 5);
-            params.push(p6);
-
-            const paramCount = Buffer.alloc(1);
-            paramCount.writeUInt8(params.length, 0);
-            const setBody = Buffer.concat([paramCount, ...params]);
-            socket.write(buildResponse(0x8103, phone, serverSerial++, setBody));
-            log(
-              `[${deviceId}] Set GPS params: strategy=timed, sleep=10s, default=10s`,
-            );
-          }
-
-          // Request immediate location
-          socket.write(
-            buildResponse(0x8201, phone, serverSerial++, Buffer.alloc(0)),
-          );
-          log(`[${deviceId}] Location query sent`);
-
-          // Temporary location tracking (0x8202) - every 5s indefinitely
-          {
-            const trackBody = Buffer.alloc(4);
-            trackBody.writeUInt16BE(5, 0); // interval: 5 seconds
-            trackBody.writeUInt16BE(0xffff, 2); // duration: indefinite
-            socket.write(
-              buildResponse(0x8202, phone, serverSerial++, trackBody),
-            );
-            log(`[${deviceId}] Temporary tracking: every 5s indefinitely`);
-          }
-          break;
-        case 0x0200:
-          socket.write(buildAck(phone, serverSerial++, serial, msgId, 0));
-          break;
-        case 0x0002:
-          socket.write(buildAck(phone, serverSerial++, serial, msgId, 0));
-          log(`[${deviceId}] Heartbeat ack`);
-          break;
-        case 0x0107: {
-          // Terminal attribute report - device tells us its capabilities
-          // Respond with query terminal params to trigger full config exchange
-          socket.write(buildAck(phone, serverSerial++, serial, msgId, 0));
-          log(`[${deviceId}] Terminal attribute report received, ack sent`);
-
-          // Query all terminal parameters (0x8104) - empty body
-          socket.write(
-            buildResponse(0x8104, phone, serverSerial++, Buffer.alloc(0)),
-          );
-          log(`[${deviceId}] Queried all terminal parameters`);
-          break;
-        }
-        case 0x0001: {
-          // Terminal general response - device acking our commands
-          const bodyLen2 = frame.readUInt16BE(2) & 0x03ff;
-          const respBody2 = frame.subarray(12, 12 + bodyLen2);
-          if (respBody2.length >= 5) {
-            const ackId = respBody2.readUInt16BE(2);
-            const result = respBody2.readUInt8(4);
-            log(
-              `[${deviceId}] Device ack: cmd=0x${ackId.toString(16).padStart(4, "0")} result=${result === 0 ? "OK" : "FAIL(" + result + ")"}`,
-            );
-          }
-          break;
-        }
-        case 0x0104: {
-          // Terminal parameter response
-          const bodyLen3 = frame.readUInt16BE(2) & 0x03ff;
-          const respBody3 = frame.subarray(12, 12 + bodyLen3);
-          log(
-            `[${deviceId}] Terminal params (${respBody3.length} bytes): ${respBody3.subarray(0, Math.min(64, respBody3.length)).toString("hex")}...`,
-          );
-          break;
-        }
-        default:
-          socket.write(buildAck(phone, serverSerial++, serial, msgId, 0));
-          log(
-            `[${deviceId}] Unknown 0x${msgId.toString(16).padStart(4, "0")}, ack sent`,
-          );
+      if (msgId === 0x0200) {
+        forwardRawFrame(deviceId, chunk.toString("hex"), msgId);
       }
+    }
+    if (!icarSocket.destroyed) icarSocket.write(chunk);
+  });
+
+  // ICAR → Device (THIS IS WHAT WE WANT TO SEE)
+  icarSocket.on("data", (chunk) => {
+    log(`[PROXY] ICAR→Device ${chunk.length} bytes: ${chunk.toString("hex")}`);
+    // Log each frame from ICAR
+    const frames = extractFrames(chunk);
+    for (const raw of frames) {
+      const frame = unescape808(raw);
+      if (frame.length < 4) continue;
+      const msgId = frame.readUInt16BE(0);
+      log(`[PROXY] ICAR sent msgId=0x${msgId.toString(16).padStart(4, "0")} body=${frame.subarray(12).toString("hex")}`);
+    }
+    if (!deviceSocket.destroyed) deviceSocket.write(chunk);
+  });
+
+  icarSocket.on("error", (err) => log(`[PROXY] ICAR socket error: ${err.message}`));
+  icarSocket.on("end", () => {
+    log(`[PROXY] ICAR disconnected`);
+    deviceSocket.end();
+  });
+
+  deviceSocket.on("end", () => {
+    log(`[PROXY] Device disconnected`);
+    icarSocket.end();
+  });
+  deviceSocket.on("error", (err) => {
+    log(`[PROXY] Device socket error: ${err.message}`);
+    icarSocket.end();
+  });
+}
+
+// ─── HTTP request handler ─────────────────────────────────────────────────────
+async function handleHttp(socket, firstChunk) {
+  let rawBuffer = firstChunk;
+  await new Promise((resolve) => {
+    const timeout = setTimeout(resolve, 500);
+    socket.on("data", (chunk) => {
+      rawBuffer = Buffer.concat([rawBuffer, chunk]);
+      const raw = rawBuffer.toString("utf8");
+      const headerEnd = raw.indexOf("\r\n\r\n");
+      if (headerEnd !== -1) {
+        const contentLengthMatch = raw.match(/content-length:\s*(\d+)/i);
+        if (contentLengthMatch) {
+          const contentLength = parseInt(contentLengthMatch[1], 10);
+          if (rawBuffer.length >= headerEnd + 4 + contentLength) {
+            clearTimeout(timeout);
+            resolve();
+          }
+        } else {
+          clearTimeout(timeout);
+          resolve();
+        }
+      }
+    });
+  });
+
+  const raw = rawBuffer.toString("utf8");
+  const firstLine = raw.split("\r\n")[0];
+  const [method, path] = firstLine.split(" ");
+
+  if (method === "GET" && path === "/health") {
+    const body = JSON.stringify({ status: "ok", connectedDevices: deviceRegistry.size, proxyMode: PROXY_MODE });
+    socket.write(`HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
+    socket.end();
+    return;
+  }
+
+  if (method === "GET" && path === "/devices") {
+    if (BRIDGE_SECRET && raw.match(/x-bridge-secret:\s*(.+)/i)?.[1]?.trim() !== BRIDGE_SECRET) {
+      socket.write("HTTP/1.1 401 Unauthorized\r\nContent-Length: 12\r\n\r\nUnauthorized");
+      socket.end(); return;
+    }
+    const body = JSON.stringify({ devices: [...deviceRegistry.keys()] });
+    socket.write(`HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
+    socket.end();
+    return;
+  }
+
+  socket.write("HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n\r\nNot found");
+  socket.end();
+}
+
+// ─── Normal mode: process device data ────────────────────────────────────────
+let serverSerial = 0;
+
+function processDeviceData(socket, chunk, clientId, onDeviceId) {
+  log(`Received ${chunk.length} bytes from ${clientId}`);
+  const frames = extractFrames(chunk);
+
+  for (const raw of frames) {
+    const frame = unescape808(raw);
+    if (frame.length < 12) continue;
+
+    const msgId = frame.readUInt16BE(0);
+    const phone = frame.subarray(4, 10);
+    const serial = frame.readUInt16BE(10);
+    const deviceId = phone.toString("hex").replace(/^0+/, "");
+    const rawHex = chunk.toString("hex");
+
+    log(`[${deviceId}] Message 0x${msgId.toString(16).padStart(4, "0")}, serial=${serial}`);
+    log(`[${deviceId}] Full frame hex: ${frame.toString("hex")}`);
+
+    if (!deviceRegistry.has(deviceId) || deviceRegistry.get(deviceId).socket !== socket) {
+      deviceRegistry.set(deviceId, { socket, phone });
+      onDeviceId(deviceId);
+      log(`[${deviceId}] Registered in device registry`);
+    }
+
+    forwardRawFrame(deviceId, rawHex, msgId);
+
+    switch (msgId) {
+      case 0x0100:
+        socket.write(buildRegisterAck(phone, serverSerial++, serial, 0, "AUTH" + deviceId));
+        log(`[${deviceId}] Registration ack sent`);
+        break;
+
+      case 0x0102:
+        socket.write(buildAck(phone, serverSerial++, serial, msgId, 0));
+        {
+          const makeParam = (id, val) => {
+            const p = Buffer.alloc(9);
+            p.writeUInt32BE(id, 0); p.writeUInt8(4, 4); p.writeUInt32BE(val, 5);
+            return p;
+          };
+          const params = [
+            makeParam(0x0020, 0), makeParam(0x0021, 0), makeParam(0x0027, 10),
+            makeParam(0x0028, 5), makeParam(0x0029, 10), makeParam(0x0001, 30),
+          ];
+          const count = Buffer.alloc(1);
+          count.writeUInt8(params.length, 0);
+          socket.write(buildResponse(0x8103, phone, serverSerial++, Buffer.concat([count, ...params])));
+          socket.write(buildResponse(0x8201, phone, serverSerial++, Buffer.alloc(0)));
+          const trackBody = Buffer.alloc(4);
+          trackBody.writeUInt16BE(5, 0);
+          trackBody.writeUInt16BE(0xffff, 2);
+          socket.write(buildResponse(0x8202, phone, serverSerial++, trackBody));
+          log(`[${deviceId}] GPS params + tracking configured`);
+        }
+        break;
+
+      case 0x0200:
+        socket.write(buildAck(phone, serverSerial++, serial, msgId, 0));
+        break;
+
+      case 0x0002:
+        socket.write(buildAck(phone, serverSerial++, serial, msgId, 0));
+        log(`[${deviceId}] Heartbeat ack`);
+        break;
+
+      case 0x0107:
+        socket.write(buildAck(phone, serverSerial++, serial, msgId, 0));
+        socket.write(buildResponse(0x8104, phone, serverSerial++, Buffer.alloc(0)));
+        log(`[${deviceId}] Terminal attribute report`);
+        break;
+
+      case 0x0001: {
+        const bodyLen = frame.readUInt16BE(2) & 0x03ff;
+        const respBody = frame.subarray(12, 12 + bodyLen);
+        if (respBody.length >= 5) {
+          const ackId = respBody.readUInt16BE(2);
+          const result = respBody.readUInt8(4);
+          log(`[${deviceId}] Device ack: cmd=0x${ackId.toString(16).padStart(4, "0")} result=${result === 0 ? "OK" : "FAIL(" + result + ")"}`);
+        }
+        break;
+      }
+
+      case 0x0104: {
+        const bodyLen = frame.readUInt16BE(2) & 0x03ff;
+        const respBody = frame.subarray(12, 12 + bodyLen);
+        log(`[${deviceId}] Terminal params: ${respBody.subarray(0, Math.min(64, respBody.length)).toString("hex")}`);
+        break;
+      }
+
+      default:
+        socket.write(buildAck(phone, serverSerial++, serial, msgId, 0));
+        log(`[${deviceId}] Unknown 0x${msgId.toString(16).padStart(4, "0")}, ack sent`);
+    }
+  }
+}
+
+// ─── TCP Server ───────────────────────────────────────────────────────────────
+const server = net.createServer((socket) => {
+  const clientId = `${socket.remoteAddress}:${socket.remotePort}`;
+  log(`Client connected: ${clientId} (proxyMode=${PROXY_MODE})`);
+  let currentDeviceId = null;
+
+  socket.once("data", (firstChunk) => {
+    const peek = firstChunk.toString("ascii", 0, 8);
+    if (peek.startsWith("GET ") || peek.startsWith("POST ") || peek.startsWith("HEAD ")) {
+      handleHttp(socket, firstChunk);
+      return;
+    }
+
+    if (PROXY_MODE) {
+      handleProxyMode(socket, firstChunk, clientId);
+      return;
+    }
+
+    processDeviceData(socket, firstChunk, clientId, (id) => { currentDeviceId = id; });
+    socket.on("data", (chunk) => {
+      processDeviceData(socket, chunk, clientId, (id) => { currentDeviceId = id; });
+    });
+  });
+
+  socket.on("end", () => {
+    log(`Client disconnected: ${clientId}`);
+    if (currentDeviceId) {
+      deviceRegistry.delete(currentDeviceId);
+      log(`[${currentDeviceId}] Removed from registry`);
     }
   });
 
-  socket.on("end", () => log(`Client disconnected: ${clientId}`));
-  socket.on("error", (err) =>
-    log(`Socket error from ${clientId}: ${err.message}`),
-  );
+  socket.on("error", (err) => {
+    log(`Socket error from ${clientId}: ${err.message}`);
+    if (currentDeviceId) deviceRegistry.delete(currentDeviceId);
+  });
 });
 
 server.on("error", (err) => log(`Server error: ${err.message}`));
-
-server.listen(PORT, HOST, () => {
-  log(`TCP server listening on ${HOST}:${PORT}`);
-});
+server.listen(PORT, HOST, () => log(`Bridge server listening on ${HOST}:${PORT} (proxyMode=${PROXY_MODE})`));
