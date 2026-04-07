@@ -93,8 +93,32 @@ function buildAsciiCommand(cmd) {
   return Buffer.concat([Buffer.from([0x7e]), Buffer.from(cmd, "ascii"), Buffer.from([0x7e])]);
 }
 
+// ─── Pending ack registry: "deviceId:ackMsgId" → { resolve, timer } ──────────
+const pendingAcks = new Map();
+
+function resolveDeviceAck(deviceId, ackMsgId, result) {
+  const key = `${deviceId}:${ackMsgId}`;
+  const pending = pendingAcks.get(key);
+  if (pending) {
+    clearTimeout(pending.timer);
+    pendingAcks.delete(key);
+    pending.resolve(result === 0 ? "OK" : `FAIL(${result})`);
+  }
+}
+
+function waitForDeviceAck(deviceId, ackMsgId, timeoutMs = 5000) {
+  return new Promise((resolve) => {
+    const key = `${deviceId}:${ackMsgId}`;
+    const timer = setTimeout(() => {
+      pendingAcks.delete(key);
+      resolve("timeout");
+    }, timeoutMs);
+    pendingAcks.set(key, { resolve, timer });
+  });
+}
+
 // ─── Command dispatch ─────────────────────────────────────────────────────────
-function sendCommand(deviceId, commandType, params, level) {
+async function sendCommand(deviceId, commandType, params, level) {
   const entry = deviceRegistry.get(deviceId);
   if (!entry) return { ok: false, reason: "device_not_connected" };
   if (!entry.socket || entry.socket.destroyed) {
@@ -126,7 +150,14 @@ function sendCommand(deviceId, commandType, params, level) {
 
   entry.socket.write(frame);
   log(`[${deviceId}] Command sent: ${commandType}${params ? " params=" + params : ""}${level ? " level=" + level : ""}`);
-  return { ok: true };
+
+  // Respond immediately — don't block waiting for device ack
+  // Ack will be logged when device replies with 0x0001 (handled in processDeviceData)
+  waitForDeviceAck(deviceId, 0x0001).then((deviceAck) => {
+    log(`[${deviceId}] Device ack for ${commandType}: ${deviceAck}`);
+  });
+
+  return { ok: true, deviceAck: "pending" };
 }
 
 // ─── Forward raw frame to Spring backend ─────────────────────────────────────
@@ -143,10 +174,10 @@ function forwardRawFrame(deviceId, rawHex, msgId) {
   req.end();
 }
 
-// ─── HTTP request handler (called when connection looks like HTTP) ────────────
-function handleHttp(socket, firstChunk) {
+// ─── HTTP request handler ─────────────────────────────────────────────────────
+async function handleHttp(socket, firstChunk) {
   const raw = firstChunk.toString("utf8");
-  const firstLine = raw.split("\r\n")[0]; // e.g. "POST /command HTTP/1.1"
+  const firstLine = raw.split("\r\n")[0];
   const [method, path] = firstLine.split(" ");
 
   // Health check
@@ -157,7 +188,7 @@ function handleHttp(socket, firstChunk) {
     return;
   }
 
-  // Connected devices
+  // Connected devices list
   if (method === "GET" && path === "/devices") {
     if (BRIDGE_SECRET) {
       const secretHeader = raw.match(/x-bridge-secret:\s*(.+)/i)?.[1]?.trim();
@@ -183,7 +214,7 @@ function handleHttp(socket, firstChunk) {
         return;
       }
     }
-    // Extract body (after \r\n\r\n)
+
     const bodyStart = raw.indexOf("\r\n\r\n");
     const bodyStr = bodyStart >= 0 ? raw.slice(bodyStart + 4) : "";
     let parsed;
@@ -202,7 +233,7 @@ function handleHttp(socket, firstChunk) {
       return;
     }
 
-    const result = sendCommand(deviceId, commandType, params, level);
+    const result = await sendCommand(deviceId, commandType, params, level);
     const status = result.ok ? "200 OK" : result.reason === "device_not_connected" ? "404 Not Found" : "400 Bad Request";
     const body = JSON.stringify(result);
     socket.write(`HTTP/1.1 ${status}\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
@@ -216,22 +247,20 @@ function handleHttp(socket, firstChunk) {
 
 // ─── TCP Server ───────────────────────────────────────────────────────────────
 let serverSerial = 0;
+
 const server = net.createServer((socket) => {
   const clientId = `${socket.remoteAddress}:${socket.remotePort}`;
   log(`Client connected: ${clientId}`);
   let currentDeviceId = null;
 
   socket.once("data", (firstChunk) => {
-    // Detect HTTP by checking if it starts with a known HTTP method
     const peek = firstChunk.toString("ascii", 0, 8);
     if (peek.startsWith("GET ") || peek.startsWith("POST ") || peek.startsWith("HEAD ")) {
       handleHttp(socket, firstChunk);
       return;
     }
 
-    // Otherwise treat as JT808 TCP device — process first chunk then keep listening
     processDeviceData(socket, firstChunk, clientId, (id) => { currentDeviceId = id; });
-
     socket.on("data", (chunk) => {
       processDeviceData(socket, chunk, clientId, (id) => { currentDeviceId = id; });
     });
@@ -332,6 +361,7 @@ function processDeviceData(socket, chunk, clientId, onDeviceId) {
           const ackId = respBody.readUInt16BE(2);
           const result = respBody.readUInt8(4);
           log(`[${deviceId}] Device ack: cmd=0x${ackId.toString(16).padStart(4, "0")} result=${result === 0 ? "OK" : "FAIL(" + result + ")"}`);
+          resolveDeviceAck(deviceId, ackId, result);
         }
         break;
       }
