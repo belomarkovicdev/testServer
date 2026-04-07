@@ -7,21 +7,17 @@ const API_HOST = process.env.API_HOST ||
   "https://pet-tracker-gfe7aygtbbhhb3b3.westeurope-01.azurewebsites.net";
 const API_PATH = "/api/location/raw";
 const BRIDGE_SECRET = process.env.BRIDGE_SECRET || "";
-
-// ICAR upstream server — device will be proxied here
-const ICAR_HOST = process.env.ICAR_HOST || "a.icargps.com";
+const ICAR_HOST = process.env.ICAR_HOST || "a.icargps.net";
 const ICAR_PORT = parseInt(process.env.ICAR_PORT || "7700", 10);
-const PROXY_MODE = process.env.PROXY_MODE === "true"; // set to "true" to enable MITM proxy
+const PROXY_MODE = process.env.PROXY_MODE === "true";
 // ──────────────────────────────────────────────────────────────────────────────
 
-function log(text) {
-  console.log(`[${new Date().toISOString()}] ${text}`);
-}
+function log(text) { console.log(`[${new Date().toISOString()}] ${text}`); }
 
-// ─── Device socket registry ───────────────────────────────────────────────────
+// ─── Device socket registry: IMEI → { socket, phone } ────────────────────────
 const deviceRegistry = new Map();
 
-// ─── JT/T 808 Protocol helpers ───────────────────────────────────────────────
+// ─── JT808 helpers ───────────────────────────────────────────────────────────
 function unescape808(buf) {
   const out = [];
   for (let i = 0; i < buf.length; i++) {
@@ -29,9 +25,7 @@ function unescape808(buf) {
       if (buf[i + 1] === 0x02) { out.push(0x7e); i++; }
       else if (buf[i + 1] === 0x01) { out.push(0x7d); i++; }
       else out.push(buf[i]);
-    } else {
-      out.push(buf[i]);
-    }
+    } else out.push(buf[i]);
   }
   return Buffer.from(out);
 }
@@ -93,6 +87,58 @@ function extractFrames(data) {
   return frames;
 }
 
+// ─── Pending ack registry ─────────────────────────────────────────────────────
+const pendingAcks = new Map();
+
+function resolveDeviceAck(deviceId, ackMsgId, result) {
+  const key = `${deviceId}:${ackMsgId}`;
+  const pending = pendingAcks.get(key);
+  if (pending) {
+    clearTimeout(pending.timer);
+    pendingAcks.delete(key);
+    pending.resolve(result === 0 ? "OK" : `FAIL(${result})`);
+  }
+}
+
+function waitForDeviceAck(deviceId, ackMsgId, timeoutMs = 5000) {
+  return new Promise((resolve) => {
+    const key = `${deviceId}:${ackMsgId}`;
+    const timer = setTimeout(() => { pendingAcks.delete(key); resolve("timeout"); }, timeoutMs);
+    pendingAcks.set(key, { resolve, timer });
+  });
+}
+
+// ─── Command dispatch ─────────────────────────────────────────────────────────
+// Confirmed command IDs from ICAR proxy sniff:
+// 0x00d1 = buzzer/sound (device acked this after ICAR sent buzzer)
+const COMMAND_MSG_IDS = {
+  BUZZER:  0x00d1,
+  SOUND:   0x00d1,
+};
+
+function sendCommand(deviceId, commandType) {
+  const entry = deviceRegistry.get(deviceId);
+  if (!entry) return { ok: false, reason: "device_not_connected" };
+  if (!entry.socket || entry.socket.destroyed) {
+    deviceRegistry.delete(deviceId);
+    return { ok: false, reason: "device_not_connected" };
+  }
+
+  const msgId = COMMAND_MSG_IDS[commandType];
+  if (!msgId) return { ok: false, reason: "unknown_command" };
+
+  const { socket, phone } = entry;
+  const frame = buildResponse(msgId, phone, serverSerial++, Buffer.alloc(0));
+  socket.write(frame);
+  log(`[COMMAND] Sent ${commandType} (0x${msgId.toString(16).padStart(4,"0")}) to device ${deviceId}`);
+
+  waitForDeviceAck(deviceId, msgId).then((ack) => {
+    log(`[COMMAND] Device ${deviceId} ack for ${commandType}: ${ack}`);
+  });
+
+  return { ok: true, deviceAck: "pending" };
+}
+
 // ─── Forward raw frame to Spring backend ─────────────────────────────────────
 function forwardRawFrame(deviceId, rawHex, msgId) {
   const https = require("https");
@@ -107,20 +153,16 @@ function forwardRawFrame(deviceId, rawHex, msgId) {
   req.end();
 }
 
-// ─── PROXY MODE: transparent MITM to ICAR server ─────────────────────────────
+// ─── PROXY MODE ───────────────────────────────────────────────────────────────
 function handleProxyMode(deviceSocket, firstChunk, clientId) {
   log(`[PROXY] Connecting to ICAR ${ICAR_HOST}:${ICAR_PORT}`);
-
   const icarSocket = net.createConnection({ host: ICAR_HOST, port: ICAR_PORT }, () => {
     log(`[PROXY] Connected to ICAR server`);
-    // Forward first chunk from device to ICAR
     icarSocket.write(firstChunk);
   });
 
-  // Device → ICAR
   deviceSocket.on("data", (chunk) => {
     log(`[PROXY] Device→ICAR ${chunk.length} bytes: ${chunk.toString("hex")}`);
-    // Also forward location to our backend
     const frames = extractFrames(chunk);
     for (const raw of frames) {
       const frame = unescape808(raw);
@@ -128,44 +170,30 @@ function handleProxyMode(deviceSocket, firstChunk, clientId) {
       const msgId = frame.readUInt16BE(0);
       const phone = frame.subarray(4, 10);
       const deviceId = phone.toString("hex").replace(/^0+/, "");
-      if (msgId === 0x0200) {
-        forwardRawFrame(deviceId, chunk.toString("hex"), msgId);
-      }
+      if (msgId === 0x0200) forwardRawFrame(deviceId, chunk.toString("hex"), msgId);
     }
     if (!icarSocket.destroyed) icarSocket.write(chunk);
   });
 
-  // ICAR → Device (THIS IS WHAT WE WANT TO SEE)
   icarSocket.on("data", (chunk) => {
     log(`[PROXY] ICAR→Device ${chunk.length} bytes: ${chunk.toString("hex")}`);
-    // Log each frame from ICAR
     const frames = extractFrames(chunk);
     for (const raw of frames) {
       const frame = unescape808(raw);
       if (frame.length < 4) continue;
       const msgId = frame.readUInt16BE(0);
-      log(`[PROXY] ICAR sent msgId=0x${msgId.toString(16).padStart(4, "0")} body=${frame.subarray(12).toString("hex")}`);
+      log(`[PROXY] ICAR sent msgId=0x${msgId.toString(16).padStart(4,"0")} body=${frame.subarray(12).toString("hex")}`);
     }
     if (!deviceSocket.destroyed) deviceSocket.write(chunk);
   });
 
   icarSocket.on("error", (err) => log(`[PROXY] ICAR socket error: ${err.message}`));
-  icarSocket.on("end", () => {
-    log(`[PROXY] ICAR disconnected`);
-    deviceSocket.end();
-  });
-
-  deviceSocket.on("end", () => {
-    log(`[PROXY] Device disconnected`);
-    icarSocket.end();
-  });
-  deviceSocket.on("error", (err) => {
-    log(`[PROXY] Device socket error: ${err.message}`);
-    icarSocket.end();
-  });
+  icarSocket.on("end", () => { log(`[PROXY] ICAR disconnected`); deviceSocket.end(); });
+  deviceSocket.on("end", () => { log(`[PROXY] Device disconnected`); icarSocket.end(); });
+  deviceSocket.on("error", (err) => { log(`[PROXY] Device error: ${err.message}`); icarSocket.end(); });
 }
 
-// ─── HTTP request handler ─────────────────────────────────────────────────────
+// ─── HTTP handler ─────────────────────────────────────────────────────────────
 async function handleHttp(socket, firstChunk) {
   let rawBuffer = firstChunk;
   await new Promise((resolve) => {
@@ -175,30 +203,21 @@ async function handleHttp(socket, firstChunk) {
       const raw = rawBuffer.toString("utf8");
       const headerEnd = raw.indexOf("\r\n\r\n");
       if (headerEnd !== -1) {
-        const contentLengthMatch = raw.match(/content-length:\s*(\d+)/i);
-        if (contentLengthMatch) {
-          const contentLength = parseInt(contentLengthMatch[1], 10);
-          if (rawBuffer.length >= headerEnd + 4 + contentLength) {
-            clearTimeout(timeout);
-            resolve();
-          }
-        } else {
-          clearTimeout(timeout);
-          resolve();
-        }
+        const clMatch = raw.match(/content-length:\s*(\d+)/i);
+        if (clMatch) {
+          if (rawBuffer.length >= headerEnd + 4 + parseInt(clMatch[1], 10)) { clearTimeout(timeout); resolve(); }
+        } else { clearTimeout(timeout); resolve(); }
       }
     });
   });
 
   const raw = rawBuffer.toString("utf8");
-  const firstLine = raw.split("\r\n")[0];
-  const [method, path] = firstLine.split(" ");
+  const [method, path] = raw.split("\r\n")[0].split(" ");
 
   if (method === "GET" && path === "/health") {
     const body = JSON.stringify({ status: "ok", connectedDevices: deviceRegistry.size, proxyMode: PROXY_MODE });
     socket.write(`HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
-    socket.end();
-    return;
+    socket.end(); return;
   }
 
   if (method === "GET" && path === "/devices") {
@@ -208,33 +227,56 @@ async function handleHttp(socket, firstChunk) {
     }
     const body = JSON.stringify({ devices: [...deviceRegistry.keys()] });
     socket.write(`HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
-    socket.end();
-    return;
+    socket.end(); return;
+  }
+
+  if (method === "POST" && path === "/command") {
+    if (BRIDGE_SECRET && raw.match(/x-bridge-secret:\s*(.+)/i)?.[1]?.trim() !== BRIDGE_SECRET) {
+      socket.write("HTTP/1.1 401 Unauthorized\r\nContent-Length: 12\r\n\r\nUnauthorized");
+      socket.end(); return;
+    }
+    const bodyStart = raw.indexOf("\r\n\r\n");
+    const bodyStr = bodyStart >= 0 ? raw.slice(bodyStart + 4) : "";
+    let parsed;
+    try { parsed = JSON.parse(bodyStr); }
+    catch {
+      socket.write("HTTP/1.1 400 Bad Request\r\nContent-Length: 12\r\n\r\nInvalid JSON");
+      socket.end(); return;
+    }
+    const { deviceId, commandType } = parsed;
+    if (!deviceId || !commandType) {
+      const body = JSON.stringify({ ok: false, reason: "missing_deviceId_or_commandType" });
+      socket.write(`HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
+      socket.end(); return;
+    }
+    log(`[COMMAND] Request: deviceId=${deviceId} commandType=${commandType}`);
+    const result = sendCommand(deviceId, commandType);
+    const status = result.ok ? "200 OK" : result.reason === "device_not_connected" ? "404 Not Found" : "400 Bad Request";
+    const body = JSON.stringify(result);
+    socket.write(`HTTP/1.1 ${status}\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
+    socket.end(); return;
   }
 
   socket.write("HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n\r\nNot found");
   socket.end();
 }
 
-// ─── Normal mode: process device data ────────────────────────────────────────
+// ─── Normal mode device processing ───────────────────────────────────────────
 let serverSerial = 0;
 
 function processDeviceData(socket, chunk, clientId, onDeviceId) {
   log(`Received ${chunk.length} bytes from ${clientId}`);
   const frames = extractFrames(chunk);
-
   for (const raw of frames) {
     const frame = unescape808(raw);
     if (frame.length < 12) continue;
-
     const msgId = frame.readUInt16BE(0);
     const phone = frame.subarray(4, 10);
     const serial = frame.readUInt16BE(10);
     const deviceId = phone.toString("hex").replace(/^0+/, "");
     const rawHex = chunk.toString("hex");
 
-    log(`[${deviceId}] Message 0x${msgId.toString(16).padStart(4, "0")}, serial=${serial}`);
-    log(`[${deviceId}] Full frame hex: ${frame.toString("hex")}`);
+    log(`[${deviceId}] Message 0x${msgId.toString(16).padStart(4,"0")}, serial=${serial}`);
 
     if (!deviceRegistry.has(deviceId) || deviceRegistry.get(deviceId).socket !== socket) {
       deviceRegistry.set(deviceId, { socket, phone });
@@ -295,7 +337,8 @@ function processDeviceData(socket, chunk, clientId, onDeviceId) {
         if (respBody.length >= 5) {
           const ackId = respBody.readUInt16BE(2);
           const result = respBody.readUInt8(4);
-          log(`[${deviceId}] Device ack: cmd=0x${ackId.toString(16).padStart(4, "0")} result=${result === 0 ? "OK" : "FAIL(" + result + ")"}`);
+          log(`[${deviceId}] Device ack: cmd=0x${ackId.toString(16).padStart(4,"0")} result=${result === 0 ? "OK" : "FAIL(" + result + ")"}`);
+          resolveDeviceAck(deviceId, ackId, result);
         }
         break;
       }
@@ -309,7 +352,7 @@ function processDeviceData(socket, chunk, clientId, onDeviceId) {
 
       default:
         socket.write(buildAck(phone, serverSerial++, serial, msgId, 0));
-        log(`[${deviceId}] Unknown 0x${msgId.toString(16).padStart(4, "0")}, ack sent`);
+        log(`[${deviceId}] Unknown 0x${msgId.toString(16).padStart(4,"0")}, ack sent`);
     }
   }
 }
@@ -323,15 +366,11 @@ const server = net.createServer((socket) => {
   socket.once("data", (firstChunk) => {
     const peek = firstChunk.toString("ascii", 0, 8);
     if (peek.startsWith("GET ") || peek.startsWith("POST ") || peek.startsWith("HEAD ")) {
-      handleHttp(socket, firstChunk);
-      return;
+      handleHttp(socket, firstChunk); return;
     }
-
     if (PROXY_MODE) {
-      handleProxyMode(socket, firstChunk, clientId);
-      return;
+      handleProxyMode(socket, firstChunk, clientId); return;
     }
-
     processDeviceData(socket, firstChunk, clientId, (id) => { currentDeviceId = id; });
     socket.on("data", (chunk) => {
       processDeviceData(socket, chunk, clientId, (id) => { currentDeviceId = id; });
@@ -340,12 +379,8 @@ const server = net.createServer((socket) => {
 
   socket.on("end", () => {
     log(`Client disconnected: ${clientId}`);
-    if (currentDeviceId) {
-      deviceRegistry.delete(currentDeviceId);
-      log(`[${currentDeviceId}] Removed from registry`);
-    }
+    if (currentDeviceId) { deviceRegistry.delete(currentDeviceId); log(`[${currentDeviceId}] Removed from registry`); }
   });
-
   socket.on("error", (err) => {
     log(`Socket error from ${clientId}: ${err.message}`);
     if (currentDeviceId) deviceRegistry.delete(currentDeviceId);
