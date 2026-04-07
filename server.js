@@ -110,10 +110,10 @@ function waitForDeviceAck(deviceId, ackMsgId, timeoutMs = 5000) {
 
 // ─── Command dispatch ─────────────────────────────────────────────────────────
 // Confirmed command IDs from ICAR proxy sniff:
-// 0x00d1 = buzzer/sound (device acked this after ICAR sent buzzer)
-const COMMAND_MSG_IDS = {
-  BUZZER:  0x00d1,
-  SOUND:   0x00d1,
+// 0x8105 body=0e3580 = buzzer/find dog (device acked 0x00d0 after receiving this)
+const COMMAND_FRAMES = {
+  BUZZER: { msgId: 0x8105, body: Buffer.from([0x0e, 0x35, 0x80]) },
+  SOUND:  { msgId: 0x8105, body: Buffer.from([0x0e, 0x35, 0x80]) },
 };
 
 function sendCommand(deviceId, commandType) {
@@ -124,15 +124,15 @@ function sendCommand(deviceId, commandType) {
     return { ok: false, reason: "device_not_connected" };
   }
 
-  const msgId = COMMAND_MSG_IDS[commandType];
-  if (!msgId) return { ok: false, reason: "unknown_command" };
+  const cmd = COMMAND_FRAMES[commandType];
+  if (!cmd) return { ok: false, reason: "unknown_command" };
 
   const { socket, phone } = entry;
-  const frame = buildResponse(msgId, phone, serverSerial++, Buffer.alloc(0));
+  const frame = buildResponse(cmd.msgId, phone, serverSerial++, cmd.body);
   socket.write(frame);
-  log(`[COMMAND] Sent ${commandType} (0x${msgId.toString(16).padStart(4,"0")}) to device ${deviceId}`);
+  log(`[COMMAND] Sent ${commandType} (0x${cmd.msgId.toString(16).padStart(4,"0")}) to device ${deviceId}`);
 
-  waitForDeviceAck(deviceId, msgId).then((ack) => {
+  waitForDeviceAck(deviceId, 0x00d0).then((ack) => {
     log(`[COMMAND] Device ${deviceId} ack for ${commandType}: ${ack}`);
   });
 
