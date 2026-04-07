@@ -1,12 +1,22 @@
 {
-  "name": "pet-tracker-bridge",
+  "name": "testserver",
   "version": "1.0.0",
-  "description": "TCP bridge server for IK122T GPS trackers",
+  "description": "",
   "main": "server.js",
   "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node server.js"
   },
-  "engines": {
-    "node": ">=18"
-  }
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/belomarkovicdev/testServer.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/belomarkovicdev/testServer/issues"
+  },
+  "homepage": "https://github.com/belomarkovicdev/testServer#readme"
 }
