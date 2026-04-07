@@ -182,6 +182,7 @@ async function handleHttp(socket, firstChunk) {
 
   // Health check
   if (method === "GET" && path === "/health") {
+    log(`[HTTP] GET /health`);
     const body = JSON.stringify({ status: "ok", connectedDevices: deviceRegistry.size });
     socket.write(`HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
     socket.end();
@@ -206,9 +207,11 @@ async function handleHttp(socket, firstChunk) {
 
   // Command endpoint
   if (method === "POST" && path === "/command") {
+    log(`[HTTP] POST /command received`);
     if (BRIDGE_SECRET) {
       const secretHeader = raw.match(/x-bridge-secret:\s*(.+)/i)?.[1]?.trim();
       if (secretHeader !== BRIDGE_SECRET) {
+        log(`[HTTP] Unauthorized - secret mismatch`);
         socket.write("HTTP/1.1 401 Unauthorized\r\nContent-Length: 12\r\n\r\nUnauthorized");
         socket.end();
         return;
@@ -217,15 +220,20 @@ async function handleHttp(socket, firstChunk) {
 
     const bodyStart = raw.indexOf("\r\n\r\n");
     const bodyStr = bodyStart >= 0 ? raw.slice(bodyStart + 4) : "";
+    log(`[HTTP] Raw body: ${bodyStr}`);
     let parsed;
     try { parsed = JSON.parse(bodyStr); }
-    catch {
+    catch (e) {
+      log(`[HTTP] JSON parse error: ${e.message}`);
       socket.write("HTTP/1.1 400 Bad Request\r\nContent-Length: 12\r\n\r\nInvalid JSON");
       socket.end();
       return;
     }
 
     const { deviceId, commandType, params, level } = parsed;
+    log(`[HTTP] Command request: deviceId=${deviceId} commandType=${commandType} params=${params} level=${level}`);
+    log(`[HTTP] Connected devices: ${[...deviceRegistry.keys()].join(", ") || "none"}`);
+
     if (!deviceId || !commandType) {
       const body = JSON.stringify({ ok: false, reason: "missing_deviceId_or_commandType" });
       socket.write(`HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
@@ -234,6 +242,7 @@ async function handleHttp(socket, firstChunk) {
     }
 
     const result = await sendCommand(deviceId, commandType, params, level);
+    log(`[HTTP] sendCommand result: ${JSON.stringify(result)}`);
     const status = result.ok ? "200 OK" : result.reason === "device_not_connected" ? "404 Not Found" : "400 Bad Request";
     const body = JSON.stringify(result);
     socket.write(`HTTP/1.1 ${status}\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
