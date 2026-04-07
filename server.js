@@ -159,11 +159,7 @@ function sendCommand(deviceId, commandType, level) {
   socket.write(frame);
   log(`[COMMAND] Sent ${commandType} (0x${msgId.toString(16).padStart(4,"0")}) to device ${deviceId}${level ? " level=" + level : ""}`);
 
-  waitForDeviceAck(deviceId, msgId).then((ack) => {
-    log(`[COMMAND] Device ${deviceId} ack for ${commandType}: ${ack}`);
-  });
-
-  return { ok: true, deviceAck: "pending" };
+  return { ok: true };
 }
 
 // ─── Forward raw frame to Spring backend ─────────────────────────────────────
