@@ -1,7 +1,7 @@
 const net = require("net");
 
 // ─── Config ───────────────────────────────────────────────────────────────────
-const PORT = parseInt(process.env.PORT || "9000", 10);
+const PORT = parseInt(process.env.RAILWAY_TCP_APPLICATION_PORT || process.env.PORT || "9000", 10);
 const HOST = "0.0.0.0";
 const API_HOST = process.env.API_HOST ||
   "https://pet-tracker-gfe7aygtbbhhb3b3.westeurope-01.azurewebsites.net";
