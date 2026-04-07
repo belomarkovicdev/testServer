@@ -176,7 +176,35 @@ function forwardRawFrame(deviceId, rawHex, msgId) {
 
 // ─── HTTP request handler ─────────────────────────────────────────────────────
 async function handleHttp(socket, firstChunk) {
-  const raw = firstChunk.toString("utf8");
+  // Buffer the full request in case body arrives in multiple chunks
+  let rawBuffer = firstChunk;
+
+  await new Promise((resolve) => {
+    // Give up to 500ms for remaining chunks to arrive
+    const timeout = setTimeout(resolve, 500);
+    socket.on("data", (chunk) => {
+      rawBuffer = Buffer.concat([rawBuffer, chunk]);
+      // If we have headers + body, resolve early
+      const raw = rawBuffer.toString("utf8");
+      const headerEnd = raw.indexOf("\r\n\r\n");
+      if (headerEnd !== -1) {
+        const contentLengthMatch = raw.match(/content-length:\s*(\d+)/i);
+        if (contentLengthMatch) {
+          const contentLength = parseInt(contentLengthMatch[1], 10);
+          const bodyStart = headerEnd + 4;
+          if (rawBuffer.length >= bodyStart + contentLength) {
+            clearTimeout(timeout);
+            resolve();
+          }
+        } else {
+          clearTimeout(timeout);
+          resolve();
+        }
+      }
+    });
+  });
+
+  const raw = rawBuffer.toString("utf8");
   const firstLine = raw.split("\r\n")[0];
   const [method, path] = firstLine.split(" ");
 
