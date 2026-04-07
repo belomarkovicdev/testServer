@@ -109,14 +109,31 @@ function waitForDeviceAck(deviceId, ackMsgId, timeoutMs = 5000) {
 }
 
 // ─── Command dispatch ─────────────────────────────────────────────────────────
-// Confirmed command IDs from ICAR proxy sniff:
-// 0x8105 body=0e3580 = buzzer/find dog (device acked 0x00d0 after receiving this)
 const COMMAND_FRAMES = {
-  BUZZER: { msgId: 0x8105, body: Buffer.from([0x0e, 0x35, 0x80]) },
-  SOUND:  { msgId: 0x8105, body: Buffer.from([0x0e, 0x35, 0x80]) },
+  BUZZER:            { msgId: 0x8105, body: Buffer.from([0x0e, 0x35, 0x80]) },
+  SOUND:             { msgId: 0x8105, body: Buffer.from([0x0d, 0xaa]) },
+  SHOCK:             { msgId: 0x8105, body: Buffer.from([0x0c, 0xaf]) },
+  RESTART:           { msgId: 0x8155, body: Buffer.alloc(0) },
+  WAKE_UP:           { msgId: 0x8201, body: Buffer.alloc(0) },
+  LOW_POWER_ON:      { msgId: 0x8103, body: Buffer.from([0x01, 0x00, 0x00, 0xf1, 0x59, 0x01, 0x08]) },
+  LOW_POWER_OFF:     { msgId: 0x8103, body: Buffer.from([0x01, 0x00, 0x00, 0xf1, 0x59, 0x01, 0x09]) },
+  SHUTDOWN_LOCK_ON:  { msgId: 0x8103, body: Buffer.from([0x01, 0x00, 0x00, 0xf1, 0x60, 0x01, 0x33]) },
+  SHUTDOWN_LOCK_OFF: { msgId: 0x8103, body: Buffer.from([0x01, 0x00, 0x00, 0xf1, 0x60, 0x01, 0x32]) },
+  VOICE_MONITOR_ON:  { msgId: 0x8116, body: Buffer.from([0x1e, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x31]) },
+  TIMER_BOOT:        { msgId: 0x8131, body: Buffer.from([0x01, 0x01, 0x23, 0x01, 0x24, 0x00, 0x9a]) },
 };
 
-function sendCommand(deviceId, commandType) {
+function buildSetIntervalBody(seconds) {
+  // 0x8103: 1 param, paramId=0x00000029 (default interval), len=4, value=seconds
+  const body = Buffer.alloc(10);
+  body.writeUInt8(0x01, 0);        // param count
+  body.writeUInt32BE(0x00000029, 1); // param id
+  body.writeUInt8(0x04, 5);        // param length
+  body.writeUInt32BE(seconds, 6);  // value
+  return body;
+}
+
+function sendCommand(deviceId, commandType, level) {
   const entry = deviceRegistry.get(deviceId);
   if (!entry) return { ok: false, reason: "device_not_connected" };
   if (!entry.socket || entry.socket.destroyed) {
@@ -124,15 +141,25 @@ function sendCommand(deviceId, commandType) {
     return { ok: false, reason: "device_not_connected" };
   }
 
-  const cmd = COMMAND_FRAMES[commandType];
-  if (!cmd) return { ok: false, reason: "unknown_command" };
-
   const { socket, phone } = entry;
-  const frame = buildResponse(cmd.msgId, phone, serverSerial++, cmd.body);
-  socket.write(frame);
-  log(`[COMMAND] Sent ${commandType} (0x${cmd.msgId.toString(16).padStart(4,"0")}) to device ${deviceId}`);
+  let msgId, body;
 
-  waitForDeviceAck(deviceId, 0x00d0).then((ack) => {
+  if (commandType === "SET_INTERVAL") {
+    const seconds = level && level > 0 ? level : 10;
+    msgId = 0x8103;
+    body = buildSetIntervalBody(seconds);
+  } else {
+    const cmd = COMMAND_FRAMES[commandType];
+    if (!cmd) return { ok: false, reason: "unknown_command" };
+    msgId = cmd.msgId;
+    body = cmd.body;
+  }
+
+  const frame = buildResponse(msgId, phone, serverSerial++, body);
+  socket.write(frame);
+  log(`[COMMAND] Sent ${commandType} (0x${msgId.toString(16).padStart(4,"0")}) to device ${deviceId}${level ? " level=" + level : ""}`);
+
+  waitForDeviceAck(deviceId, 0x8105).then((ack) => {
     log(`[COMMAND] Device ${deviceId} ack for ${commandType}: ${ack}`);
   });
 
@@ -243,14 +270,14 @@ async function handleHttp(socket, firstChunk) {
       socket.write("HTTP/1.1 400 Bad Request\r\nContent-Length: 12\r\n\r\nInvalid JSON");
       socket.end(); return;
     }
-    const { deviceId, commandType } = parsed;
+    const { deviceId, commandType, level } = parsed;
     if (!deviceId || !commandType) {
       const body = JSON.stringify({ ok: false, reason: "missing_deviceId_or_commandType" });
       socket.write(`HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
       socket.end(); return;
     }
-    log(`[COMMAND] Request: deviceId=${deviceId} commandType=${commandType}`);
-    const result = sendCommand(deviceId, commandType);
+    log(`[COMMAND] Request: deviceId=${deviceId} commandType=${commandType}${level ? " level=" + level : ""}`);
+    const result = sendCommand(deviceId, commandType, level);
     const status = result.ok ? "200 OK" : result.reason === "device_not_connected" ? "404 Not Found" : "400 Bad Request";
     const body = JSON.stringify(result);
     socket.write(`HTTP/1.1 ${status}\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
