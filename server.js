@@ -115,7 +115,7 @@ function decode8105Body(body) {
   if (b0 === 0x0c) return `[${body.toString("hex")}] : find lost device (continuous sound)`;
   if (b0 === 0x0d) return `[${body.toString("hex")}] : night light`;
   if (b0 === 0x0f) return `[${body.toString("hex")}] : training sound`;
-  if (b0 === 0x0e && body.length >= 3) {
+  if (b0 === 0x0e && body.length >= 2) {
     const lvl = body[1] - 0x30;
     return `[${body.toString("hex")}] : shock level ${lvl}`;
   }
@@ -163,10 +163,10 @@ function decodeDeviceAck(ackMsgId, result) {
 
 
 const COMMAND_FRAMES = {
-  TRAINING_SOUND:    { msgId: 0x8105, body: () => Buffer.from([0x0f, 0xb6]) },
-  FIND_SOUND:        { msgId: 0x8105, body: () => Buffer.from([0x0c, 0xaf]) },
-  NIGHT_LIGHT:       { msgId: 0x8105, body: () => Buffer.from([0x0d, 0xaa]) },
-  SHOCK:             { msgId: 0x8105, body: (lvl) => { const l = (lvl >= 1 && lvl <= 9) ? lvl : 1; return Buffer.from([0x0e, 0x30 + l, 0x83 + l]); } },
+  TRAINING_SOUND:    { msgId: 0x8105, body: () => Buffer.from([0x0f]) },
+  FIND_SOUND:        { msgId: 0x8105, body: () => Buffer.from([0x0c]) },
+  NIGHT_LIGHT:       { msgId: 0x8105, body: () => Buffer.from([0x0d]) },
+  SHOCK:             { msgId: 0x8105, body: (lvl) => { const l = (lvl >= 1 && lvl <= 9) ? lvl : 1; return Buffer.from([0x0e, 0x30 + l]); } },
   RESTART:           { msgId: 0x8155, body: () => Buffer.alloc(0) },
   WAKE_UP:           { msgId: 0x8201, body: () => Buffer.alloc(0) },
   LOW_POWER_ON:      { msgId: 0x8103, body: () => Buffer.from([0x01, 0x00, 0x00, 0xf1, 0x59, 0x01, 0x08]) },
