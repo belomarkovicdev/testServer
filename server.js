@@ -108,7 +108,60 @@ function waitForDeviceAck(deviceId, ackMsgId, timeoutMs = 5000) {
   });
 }
 
-// ─── Command dispatch ─────────────────────────────────────────────────────────
+// ─── Frame decoder (human-friendly log) ──────────────────────────────────────
+function decode8105Body(body) {
+  if (body.length === 0) return "no body";
+  const b0 = body[0];
+  if (b0 === 0x0c) return `[${body.toString("hex")}] : find lost device (continuous sound)`;
+  if (b0 === 0x0d) return `[${body.toString("hex")}] : night light`;
+  if (b0 === 0x0f) return `[${body.toString("hex")}] : training sound`;
+  if (b0 === 0x0e && body.length >= 3) {
+    const lvl = body[1] - 0x30;
+    return `[${body.toString("hex")}] : shock level ${lvl}`;
+  }
+  return `[${body.toString("hex")}] : unknown 0x8105 subtype`;
+}
+
+function decode8103Body(body) {
+  if (body.length < 6) return `[${body.toString("hex")}] : set params`;
+  const paramId = body.readUInt32BE(1);
+  const paramLen = body[5];
+  if (paramId === 0x00000029 && paramLen === 4 && body.length >= 10) {
+    const seconds = body.readUInt32BE(6);
+    return `[${body.toString("hex")}] : set interval ${seconds}s`;
+  }
+  if (paramId === 0x0000f159) return `[${body.toString("hex")}] : low power ${body[body.length - 1] === 0x08 ? "ON" : "OFF"}`;
+  if (paramId === 0x0000f160) return `[${body.toString("hex")}] : shutdown lock ${body[body.length - 1] === 0x33 ? "ON" : "OFF"}`;
+  return `[${body.toString("hex")}] : set params id=0x${paramId.toString(16).padStart(8,"0")}`;
+}
+
+function decodeCommandFrame(msgId, body) {
+  switch (msgId) {
+    case 0x8105: return decode8105Body(body);
+    case 0x8103: return decode8103Body(body);
+    case 0x8155: return `[] : restart device`;
+    case 0x8201: return `[] : wake up / request location`;
+    case 0x8116: return `[${body.toString("hex")}] : voice monitor on (30s)`;
+    case 0x8131: return `[${body.toString("hex")}] : timer boot`;
+    case 0x8001: return `[${body.toString("hex")}] : server ack`;
+    default:     return `[${body.toString("hex")}] : msgId=0x${msgId.toString(16).padStart(4,"0")}`;
+  }
+}
+
+function decodeDeviceAck(ackMsgId, result) {
+  const resultStr = result === 0 ? "OK" : `FAIL(${result})`;
+  switch (ackMsgId) {
+    case 0x8105: return `device ack → 0x8105 (sound/shock/light) : ${resultStr}`;
+    case 0x8103: return `device ack → 0x8103 (set params) : ${resultStr}`;
+    case 0x8155: return `device ack → 0x8155 (restart) : ${resultStr}`;
+    case 0x8201: return `device ack → 0x8201 (wake up) : ${resultStr}`;
+    case 0x8116: return `device ack → 0x8116 (voice monitor) : ${resultStr}`;
+    case 0x8131: return `device ack → 0x8131 (timer boot) : ${resultStr}`;
+    default:     return `device ack → 0x${ackMsgId.toString(16).padStart(4,"0")} : ${resultStr}`;
+  }
+}
+
+
 const COMMAND_FRAMES = {
   TRAINING_SOUND:    { msgId: 0x8105, body: () => Buffer.from([0x0f, 0xb6]) },
   FIND_SOUND:        { msgId: 0x8105, body: () => Buffer.from([0x0c, 0xaf]) },
@@ -158,7 +211,7 @@ function sendCommand(deviceId, commandType, level) {
 
   const frame = buildResponse(msgId, phone, serverSerial++, body);
   socket.write(frame);
-  log(`[COMMAND] Sent ${commandType} (0x${msgId.toString(16).padStart(4,"0")}) to device ${deviceId}${level ? " level=" + level : ""}`);
+  log(`[COMMAND] Sent ${commandType} → ${decodeCommandFrame(msgId, body)}`);
 
   return { ok: true };
 }
@@ -361,7 +414,7 @@ function processDeviceData(socket, chunk, clientId, onDeviceId) {
         if (respBody.length >= 5) {
           const ackId = respBody.readUInt16BE(2);
           const result = respBody.readUInt8(4);
-          log(`[${deviceId}] Device ack: cmd=0x${ackId.toString(16).padStart(4,"0")} result=${result === 0 ? "OK" : "FAIL(" + result + ")"}`);
+          log(`[${deviceId}] ${decodeDeviceAck(ackId, result)}`);
           resolveDeviceAck(deviceId, ackId, result);
         }
         break;
