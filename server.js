@@ -110,17 +110,18 @@ function waitForDeviceAck(deviceId, ackMsgId, timeoutMs = 5000) {
 
 // ─── Command dispatch ─────────────────────────────────────────────────────────
 const COMMAND_FRAMES = {
-  BUZZER:            { msgId: 0x8105, body: Buffer.from([0x0e, 0x35, 0x80]) },
-  SOUND:             { msgId: 0x8105, body: Buffer.from([0x0d, 0xaa]) },
-  SHOCK:             { msgId: 0x8105, body: Buffer.from([0x0c, 0xaf]) },
-  RESTART:           { msgId: 0x8155, body: Buffer.alloc(0) },
-  WAKE_UP:           { msgId: 0x8201, body: Buffer.alloc(0) },
-  LOW_POWER_ON:      { msgId: 0x8103, body: Buffer.from([0x01, 0x00, 0x00, 0xf1, 0x59, 0x01, 0x08]) },
-  LOW_POWER_OFF:     { msgId: 0x8103, body: Buffer.from([0x01, 0x00, 0x00, 0xf1, 0x59, 0x01, 0x09]) },
-  SHUTDOWN_LOCK_ON:  { msgId: 0x8103, body: Buffer.from([0x01, 0x00, 0x00, 0xf1, 0x60, 0x01, 0x33]) },
-  SHUTDOWN_LOCK_OFF: { msgId: 0x8103, body: Buffer.from([0x01, 0x00, 0x00, 0xf1, 0x60, 0x01, 0x32]) },
-  VOICE_MONITOR_ON:  { msgId: 0x8116, body: Buffer.from([0x1e, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x31]) },
-  TIMER_BOOT:        { msgId: 0x8131, body: Buffer.from([0x01, 0x01, 0x23, 0x01, 0x24, 0x00, 0x9a]) },
+  TRAINING_SOUND:    { msgId: 0x8105, body: () => Buffer.from([0x0f, 0xb6]) },
+  FIND_SOUND:        { msgId: 0x8105, body: () => Buffer.from([0x0c, 0xaf]) },
+  NIGHT_LIGHT:       { msgId: 0x8105, body: () => Buffer.from([0x0d, 0xaa]) },
+  SHOCK:             { msgId: 0x8105, body: (lvl) => { const l = (lvl >= 1 && lvl <= 9) ? lvl : 1; return Buffer.from([0x0e, 0x30 + l, 0x83 + l]); } },
+  RESTART:           { msgId: 0x8155, body: () => Buffer.alloc(0) },
+  WAKE_UP:           { msgId: 0x8201, body: () => Buffer.alloc(0) },
+  LOW_POWER_ON:      { msgId: 0x8103, body: () => Buffer.from([0x01, 0x00, 0x00, 0xf1, 0x59, 0x01, 0x08]) },
+  LOW_POWER_OFF:     { msgId: 0x8103, body: () => Buffer.from([0x01, 0x00, 0x00, 0xf1, 0x59, 0x01, 0x09]) },
+  SHUTDOWN_LOCK_ON:  { msgId: 0x8103, body: () => Buffer.from([0x01, 0x00, 0x00, 0xf1, 0x60, 0x01, 0x33]) },
+  SHUTDOWN_LOCK_OFF: { msgId: 0x8103, body: () => Buffer.from([0x01, 0x00, 0x00, 0xf1, 0x60, 0x01, 0x32]) },
+  VOICE_MONITOR_ON:  { msgId: 0x8116, body: () => Buffer.from([0x1e, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x31]) },
+  TIMER_BOOT:        { msgId: 0x8131, body: () => Buffer.from([0x01, 0x01, 0x23, 0x01, 0x24, 0x00, 0x9a]) },
 };
 
 function buildSetIntervalBody(seconds) {
@@ -152,7 +153,7 @@ function sendCommand(deviceId, commandType, level) {
     const cmd = COMMAND_FRAMES[commandType];
     if (!cmd) return { ok: false, reason: "unknown_command" };
     msgId = cmd.msgId;
-    body = cmd.body;
+    body = cmd.body(level);
   }
 
   const frame = buildResponse(msgId, phone, serverSerial++, body);
