@@ -416,6 +416,12 @@ function processDeviceData(socket, chunk, clientId, onDeviceId) {
           const result = respBody.readUInt8(4);
           log(`[${deviceId}] ${decodeDeviceAck(ackId, result)}`);
           resolveDeviceAck(deviceId, ackId, result);
+        } else if (respBody.length >= 3) {
+          // some devices send: responseSerial(2) + result(1), no ackMsgId
+          const result = respBody.readUInt8(2);
+          log(`[${deviceId}] device ack (short form) result=${result === 0 ? "OK" : "FAIL(" + result + ")"} body=${respBody.toString("hex")}`);
+        } else {
+          log(`[${deviceId}] device ack body too short: ${respBody.toString("hex")}`);
         }
         break;
       }
