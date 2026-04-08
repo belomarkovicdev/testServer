@@ -239,27 +239,50 @@ function handleProxyMode(deviceSocket, firstChunk, clientId) {
   });
 
   deviceSocket.on("data", (chunk) => {
-    log(`[PROXY] Device→ICAR ${chunk.length} bytes: ${chunk.toString("hex")}`);
     const frames = extractFrames(chunk);
     for (const raw of frames) {
       const frame = unescape808(raw);
       if (frame.length < 12) continue;
       const msgId = frame.readUInt16BE(0);
+      const bodyLen = frame.readUInt16BE(2) & 0x03ff;
       const phone = frame.subarray(4, 10);
       const deviceId = phone.toString("hex").replace(/^0+/, "");
-      if (msgId === 0x0200) forwardRawFrame(deviceId, chunk.toString("hex"), msgId);
+      const body = frame.subarray(12, 12 + bodyLen);
+
+      let decoded;
+      switch (msgId) {
+        case 0x0200: decoded = "location report"; forwardRawFrame(deviceId, chunk.toString("hex"), msgId); break;
+        case 0x0002: decoded = "heartbeat"; break;
+        case 0x0100: decoded = "registration"; break;
+        case 0x0102: decoded = "auth"; break;
+        case 0x0107: decoded = "terminal attributes"; break;
+        case 0x0001: {
+          if (body.length >= 5) {
+            const ackId = body.readUInt16BE(2);
+            const result = body.readUInt8(4);
+            decoded = decodeDeviceAck(ackId, result);
+          } else if (body.length >= 3) {
+            decoded = `ack (short) result=${body.readUInt8(2) === 0 ? "OK" : "FAIL(" + body.readUInt8(2) + ")"}`;
+          } else decoded = `ack body=${body.toString("hex")}`;
+          break;
+        }
+        default: decoded = `msgId=0x${msgId.toString(16).padStart(4,"0")} body=${body.toString("hex")}`;
+      }
+      log(`[PROXY] Device→ICAR [${deviceId}] ${decoded}`);
     }
     if (!icarSocket.destroyed) icarSocket.write(chunk);
   });
 
   icarSocket.on("data", (chunk) => {
-    log(`[PROXY] ICAR→Device ${chunk.length} bytes: ${chunk.toString("hex")}`);
     const frames = extractFrames(chunk);
     for (const raw of frames) {
       const frame = unescape808(raw);
       if (frame.length < 4) continue;
       const msgId = frame.readUInt16BE(0);
-      log(`[PROXY] ICAR sent msgId=0x${msgId.toString(16).padStart(4,"0")} body=${frame.subarray(12).toString("hex")}`);
+      const bodyLen = frame.readUInt16BE(2) & 0x03ff;
+      const body = frame.subarray(12, 12 + bodyLen);
+      const decoded = decodeCommandFrame(msgId, body);
+      log(`[PROXY] ICAR→Device ${decoded}`);
     }
     if (!deviceSocket.destroyed) deviceSocket.write(chunk);
   });
