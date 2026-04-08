@@ -112,6 +112,7 @@ function waitForDeviceAck(deviceId, ackMsgId, timeoutMs = 5000) {
 function decode8105Body(body) {
   if (body.length === 0) return "no body";
   const b0 = body[0];
+  if (b0 === 0x05) return `[${body.toString("hex")}] : factory reset`;
   if (b0 === 0x0c) return `[${body.toString("hex")}] : find lost device (continuous sound)`;
   if (b0 === 0x0d) return `[${body.toString("hex")}] : night light`;
   if (b0 === 0x0f) return `[${body.toString("hex")}] : training sound`;
@@ -130,8 +131,8 @@ function decode8103Body(body) {
     const seconds = body.readUInt32BE(6);
     return `[${body.toString("hex")}] : set interval ${seconds}s`;
   }
-  if (paramId === 0x0000f159) return `[${body.toString("hex")}] : low power ${body[body.length - 1] === 0x08 ? "ON" : "OFF"}`;
-  if (paramId === 0x0000f160) return `[${body.toString("hex")}] : shutdown lock ${body[body.length - 1] === 0x33 ? "ON" : "OFF"}`;
+  if (paramId === 0x0000f159) return `[${body.toString("hex")}] : low power ${body[body.length - 1] === 0x01 ? "ON" : "OFF"}`;
+  if (paramId === 0x0000f160) return `[${body.toString("hex")}] : shutdown lock ${body[body.length - 1] === 0x01 ? "ON" : "OFF"}`;
   return `[${body.toString("hex")}] : set params id=0x${paramId.toString(16).padStart(8,"0")}`;
 }
 
@@ -139,7 +140,7 @@ function decodeCommandFrame(msgId, body) {
   switch (msgId) {
     case 0x8105: return decode8105Body(body);
     case 0x8103: return decode8103Body(body);
-    case 0x8155: return `[] : restart device`;
+    case 0x8155: return `[] : reboot device`;
     case 0x8201: return `[] : wake up / request location`;
     case 0x8116: return `[${body.toString("hex")}] : voice monitor on (30s)`;
     case 0x8131: return `[${body.toString("hex")}] : timer boot`;
@@ -167,12 +168,13 @@ const COMMAND_FRAMES = {
   FIND_SOUND:        { msgId: 0x8105, body: () => Buffer.from([0x0c]) },
   NIGHT_LIGHT:       { msgId: 0x8105, body: () => Buffer.from([0x0d]) },
   SHOCK:             { msgId: 0x8105, body: (lvl) => { const l = (lvl >= 1 && lvl <= 9) ? lvl : 1; return Buffer.from([0x0e, 0x30 + l]); } },
-  RESTART:           { msgId: 0x8155, body: () => Buffer.alloc(0) },
+  REBOOT:            { msgId: 0x8155, body: () => Buffer.alloc(0) },
+  RESET:             { msgId: 0x8105, body: () => Buffer.from([0x05]) },
   WAKE_UP:           { msgId: 0x8201, body: () => Buffer.alloc(0) },
-  LOW_POWER_ON:      { msgId: 0x8103, body: () => Buffer.from([0x01, 0x00, 0x00, 0xf1, 0x59, 0x01, 0x08]) },
-  LOW_POWER_OFF:     { msgId: 0x8103, body: () => Buffer.from([0x01, 0x00, 0x00, 0xf1, 0x59, 0x01, 0x09]) },
-  SHUTDOWN_LOCK_ON:  { msgId: 0x8103, body: () => Buffer.from([0x01, 0x00, 0x00, 0xf1, 0x60, 0x01, 0x33]) },
-  SHUTDOWN_LOCK_OFF: { msgId: 0x8103, body: () => Buffer.from([0x01, 0x00, 0x00, 0xf1, 0x60, 0x01, 0x32]) },
+  LOW_POWER_ON:      { msgId: 0x8103, body: () => Buffer.from([0x01, 0x00, 0x00, 0xf1, 0x59, 0x01, 0x01]) },
+  LOW_POWER_OFF:     { msgId: 0x8103, body: () => Buffer.from([0x01, 0x00, 0x00, 0xf1, 0x59, 0x01, 0x00]) },
+  SHUTDOWN_LOCK_ON:  { msgId: 0x8103, body: () => Buffer.from([0x01, 0x00, 0x00, 0xf1, 0x60, 0x01, 0x01]) },
+  SHUTDOWN_LOCK_OFF: { msgId: 0x8103, body: () => Buffer.from([0x01, 0x00, 0x00, 0xf1, 0x60, 0x01, 0x00]) },
   VOICE_MONITOR_ON:  { msgId: 0x8116, body: () => Buffer.from([0x1e, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x31]) },
   TIMER_BOOT:        { msgId: 0x8131, body: () => Buffer.from([0x01, 0x01, 0x23, 0x01, 0x24, 0x00, 0x9a]) },
 };
@@ -187,7 +189,7 @@ function buildSetIntervalBody(seconds) {
   return body;
 }
 
-function sendCommand(deviceId, commandType, level) {
+function sendCommand(deviceId, commandType, level, params) {
   const entry = deviceRegistry.get(deviceId);
   if (!entry) return { ok: false, reason: "device_not_connected" };
   if (!entry.socket || entry.socket.destroyed) {
@@ -202,6 +204,11 @@ function sendCommand(deviceId, commandType, level) {
     const seconds = level && level > 0 ? level : 10;
     msgId = 0x8103;
     body = buildSetIntervalBody(seconds);
+  } else if (commandType === "SET_ADMIN_NUMBER") {
+    const phone = (params || "").replace(/\0/g, "");
+    const phoneBuf = Buffer.from(phone + "\0", "ascii");
+    body = Buffer.concat([Buffer.from([0x01, 0x01, 0x03, phoneBuf.length]), phoneBuf]);
+    msgId = 0x8401;
   } else {
     const cmd = COMMAND_FRAMES[commandType];
     if (!cmd) return { ok: false, reason: "unknown_command" };
@@ -343,14 +350,14 @@ async function handleHttp(socket, firstChunk) {
       socket.write("HTTP/1.1 400 Bad Request\r\nContent-Length: 12\r\n\r\nInvalid JSON");
       socket.end(); return;
     }
-    const { deviceId, commandType, level } = parsed;
+    const { deviceId, commandType, level, params } = parsed;
     if (!deviceId || !commandType) {
       const body = JSON.stringify({ ok: false, reason: "missing_deviceId_or_commandType" });
       socket.write(`HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
       socket.end(); return;
     }
-    log(`[COMMAND] Request: deviceId=${deviceId} commandType=${commandType}${level ? " level=" + level : ""}`);
-    const result = sendCommand(deviceId, commandType, level);
+    log(`[COMMAND] Request: deviceId=${deviceId} commandType=${commandType}${level ? " level=" + level : ""}${params ? " params=" + params : ""}`);
+    const result = sendCommand(deviceId, commandType, level, params);
     const status = result.ok ? "200 OK" : result.reason === "device_not_connected" ? "404 Not Found" : "400 Bad Request";
     const body = JSON.stringify(result);
     socket.write(`HTTP/1.1 ${status}\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
